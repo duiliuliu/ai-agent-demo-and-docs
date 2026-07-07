@@ -60,7 +60,11 @@ class IntentRecognizer:
         )
 
         if self.llm_client:
-            response = self.llm_client.complete(prompt)
+            llm_response = self.llm_client.complete(prompt)
+            if hasattr(llm_response, 'content'):
+                response = llm_response.content
+            else:
+                response = str(llm_response)
         else:
             response = self._mock_intent_recognition(user_message, available_skills)
 

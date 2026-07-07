@@ -1,5 +1,8 @@
+import os
 from sys import path
-path.append('/workspace/02-tool-use')
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from skill import intent_recognizer, tool_executor, tool_registry
 import json
