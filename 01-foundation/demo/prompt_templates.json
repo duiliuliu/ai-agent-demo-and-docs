@@ -1,0 +1,7 @@
+{
+  "analyze_text": "请分析以下文本，并给出你的见解：\n\n{text}\n\n分析结果：",
+  "summarize": "请用不超过{max_length}字总结以下内容：\n\n{content}\n\n总结：",
+  "translate": "请将以下{source_lang}文本翻译成{target_lang}：\n\n{text}\n\n翻译结果：",
+  "code_review": "请审查以下代码，指出潜在问题和改进建议：\n\n```\n{code}\n```\n\n审查意见：",
+  "write_email": "请帮我写一封{purpose}的邮件，收件人是{recipient}，内容要点：{points}"
+}
