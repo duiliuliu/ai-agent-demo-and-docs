@@ -1,29 +1,40 @@
-# skill: tool_registry
+# Tool Use Skill 模块
 
-## 设计目标
+## 说明
 
-让 LLM 能够安全地发现、理解和调用外部工具。提供工具注册、Schema 生成、执行隔离和错误封装能力。
+本目录包含工具使用模块的核心技能组件。详细文档请参考上级目录的 [README.md](../README.md)。
 
-## 接口清单
+## 文件结构
 
-| 文件 | 职责 |
-|------|------|
-| `tool_registry.py` | 工具注册中心：注册、发现、执行 |
-| `tool_schema_builder.py` | 从 Python 函数自动生成 JSON Schema |
-| `tool_executor.py` | 沙盒执行：超时控制、异常捕获、结果格式化 |
-
-## 使用方式
-
-```python
-from skill.tool_registry import ToolRegistry
-
-registry = ToolRegistry()
-registry.register("get_weather", schema, get_weather_func)
-schemas = registry.get_schemas()  # 传给 LLM
-result = registry.execute("get_weather", {"city": "Beijing"})
+```
+skill/
+├── __init__.py          # 模块导出
+├── tool_registry.py     # 工具注册器
+├── skill_manager.py     # 技能管理器
+├── prompt_manager.py    # Prompt管理器
+├── intent_recognizer.py # 意图识别器
+├── tool_executor.py     # 工具执行器
+└── router.py            # 路由选择器
 ```
 
-## 边界约束
+## 快速入门
 
-- 工具执行失败时，返回结构化错误信息（而非抛出裸异常），便于 LLM 理解并修复。
-- 不依赖具体 LLM 实现，仅与 `01-foundation/skill/base_llm_client` 的接口类型交互（如需）。
+```python
+from skill import (
+    tool_registry,
+    skill_manager,
+    prompt_manager,
+    intent_recognizer,
+    tool_executor,
+    router
+)
+```
+
+## 核心组件
+
+1. **ToolRegistry**: 工具的注册、卸载、查询
+2. **SkillManager**: Skill的注册、卸载、查询
+3. **PromptManager**: Prompt模板的注册、渲染
+4. **IntentRecognizer**: 用户意图识别与分析
+5. **ToolExecutor**: 工具调用执行
+6. **Router**: 意图到Skill/工具的路由

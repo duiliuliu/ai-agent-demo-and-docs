@@ -1,68 +1,208 @@
-# 02 工具调用（Tool Use / Function Calling）
+# 02-tool-use - 工具使用模块
 
-## 定义
+## 概述
 
-**工具调用**是指 Agent 在推理过程中，根据上下文判断需要调用外部函数或 API，将函数结果带回对话继续推理的能力。它是 Agent 从"纯文本生成"迈向"与环境交互"的关键一步。
+本模块实现了一个完整的工具使用框架，包括：
 
-核心概念：
-- **Tool Schema**：用 JSON Schema 描述工具的名称、参数、类型和描述，供 LLM 理解。
-- **Tool Registry**：工具的注册中心，支持动态注册、发现和调用。
-- **Execution Engine**：实际执行工具调用的沙盒，负责参数解析、执行、错误捕获和结果格式化。
+1. **意图识别** - 分析用户输入，提取意图和槽位信息
+2. **信息补全** - 多轮对话补齐缺失参数
+3. **工具调用** - 执行注册的工具函数
+4. **路由选择** - 根据意图路由到对应的Skill和工具
 
-## 示例
+## 核心组件
 
-### Demo 列表
+### 1. ToolRegistry (工具注册器)
 
-| Demo | 说明 | 依赖 |
-|------|------|------|
-| `demo/01_define_tool.py` | 手动定义 Schema 并注册 | `01-foundation/skill/` |
-| `demo/02_tool_loop.py` | LLM 判断调用 + 执行 + 续对话 | `01-foundation/skill/` |
-| `demo/03_tool_error_handling.py` | 参数错误、执行失败时的容错 | `01-foundation/skill/` |
-
-### 核心代码片段
+- **文件**: `skill/tool_registry.py`
+- **功能**: 管理工具的注册、卸载、查询
+- **特性**: 支持参数自动推断
 
 ```python
-# skill/tool_registry.py 设计目标：让 LLM 能发现和安全调用工具
-from typing import Callable, Any
-import json
+from skill import tool_registry
 
-class ToolRegistry:
-    def __init__(self):
-        self._tools: dict[str, Callable] = {}
-        self._schemas: dict[str, dict] = {}
+def get_weather(city: str) -> str:
+    return f"{city}天气晴朗"
 
-    def register(self, name: str, schema: dict, func: Callable):
-        """注册工具：schema 供 LLM 使用，func 供本地执行"""
-        self._tools[name] = func
-        self._schemas[name] = schema
-
-    def get_schemas(self) -> list[dict]:
-        return list(self._schemas.values())
-
-    def execute(self, name: str, arguments: dict) -> Any:
-        if name not in self._tools:
-            raise ValueError(f"Tool '{name}' not found")
-        return self._tools[name](**arguments)
+tool_registry.register_tool(
+    name="get_weather",
+    func=get_weather,
+    description="查询天气",
+    parameters={"city": {"type": "str", "required": True}}
+)
 ```
 
-## 企业应用注意点
+### 2. SkillManager (技能管理器)
 
-1. **权限最小化**：工具执行必须遵循最小权限原则。尤其是数据库查询、文件操作、发送邮件等工具，需接入企业统一权限体系。
-2. **输入校验**：LLM 生成的参数不可信任。所有入参必须经过 Schema 校验和业务规则校验，防止注入或误操作。
-3. **超时与熔断**：工具调用可能涉及外部 API，必须设置独立超时和熔断策略，避免阻塞 Agent 主循环。
-4. **审计日志**：记录"调用了什么工具、传入什么参数、返回什么结果"，用于事后追溯和安全审计。
-5. **工具版本管理**：工具 Schema 变更需兼容旧版本 Agent，避免已部署的 Agent 因 Schema 不匹配而失败。
+- **文件**: `skill/skill_manager.py`
+- **功能**: 管理Skill的注册、卸载、查询
+- **特性**: 支持按意图/工具查询关联Skill
 
-## 应用场景推演
+```python
+from skill import skill_manager
 
-### 场景：智能客服工单系统
-Agent 接收用户投诉后，需要：
-1. 查询订单状态（调用订单 API）。
-2. 若符合退款条件，创建退款工单（调用工单系统 API）。
-3. 将处理结果通过邮件通知用户（调用邮件发送工具）。
+class WeatherSkill:
+    def process(self, city: str) -> str:
+        return f"WeatherSkill处理: {city}"
 
-**注意点**：订单 API 和工单 API 涉及敏感数据，必须校验 Agent 的身份和权限；邮件发送工具需要防滥用机制（如频率限制）。
+skill_manager.register_skill(
+    name="weather_skill",
+    skill_instance=WeatherSkill(),
+    description="天气查询技能",
+    required_tools=["get_weather"],
+    supported_intents=["weather"]
+)
+```
 
-### 演进路径
-- 当前层让 Agent 拥有"手脚"。
-- 下一章（03-memory）将解决 Agent"健忘"的问题，使其能记住对话历史和长期知识。
+### 3. PromptManager (Prompt管理器)
+
+- **文件**: `skill/prompt_manager.py`
+- **功能**: 管理Prompt模板的注册、渲染
+- **内置Prompt**: `intent_recognition` - 意图识别模板
+
+```python
+from skill import prompt_manager
+
+prompt_manager.register_prompt(
+    name="my_prompt",
+    template="Hello {name}",
+    required_vars=["name"]
+)
+
+rendered = prompt_manager.render_prompt("my_prompt", name="World")
+```
+
+### 4. IntentRecognizer (意图识别器)
+
+- **文件**: `skill/intent_recognizer.py`
+- **功能**: 分析用户输入，输出结构化意图分析结果
+- **输出结构**:
+  - `intent`: 主意图、次意图、是否新话题
+  - `provided_info`: 已提供槽位、原始提及
+  - `missing_info`: 缺失参数（必需/可选）、歧义字段
+  - `confidence`: 置信度（综合/意图/槽位）
+  - `execution`: 是否可执行、下一步动作、建议回复
+
+```python
+from skill import intent_recognizer
+
+analysis = intent_recognizer.recognize(
+    user_message="查北京天气",
+    conversation_history=[],
+    available_skills=["weather", "book_flight"]
+)
+
+print(analysis.intent.get("primary"))      # weather
+print(analysis.execution.get("can_proceed")) # True
+```
+
+### 5. ToolExecutor (工具执行器)
+
+- **文件**: `skill/tool_executor.py`
+- **功能**: 执行已注册的工具
+- **特性**: 参数校验、错误处理
+
+```python
+from skill import tool_executor
+
+result = tool_executor.execute("get_weather", city="北京")
+print(result.success)  # True
+print(result.result)   # 北京天气晴朗
+```
+
+### 6. Router (路由选择器)
+
+- **文件**: `skill/router.py`
+- **功能**: 根据意图路由到对应的Skill和工具
+- **特性**: 路由验证、置信度传递
+
+```python
+from skill import router
+
+router.register_route(
+    intent="weather",
+    skill_name="weather_skill",
+    prompt_name="intent_recognition",
+    tool_names=["get_weather"]
+)
+
+route = router.route(intent_analysis)
+print(route.skill_name)  # weather_skill
+```
+
+## Demo 列表
+
+| Demo | 文件 | 说明 |
+|------|------|------|
+| Demo 1 | `demo/01_simple_tool_call.py` | 简单工具调用 |
+| Demo 2 | `demo/02_intent_recognition.py` | 意图识别 |
+| Demo 3 | `demo/03_multi_round_info_completion.py` | 多轮信息补全 |
+| Demo 4 | `demo/04_skill_tool_router.py` | Skill和工具路由 |
+| Demo 5 | `demo/05_advanced_management.py` | 进阶管理功能 |
+
+## 运行 Demo
+
+```bash
+cd /workspace/02-tool-use
+
+# 运行简单工具调用
+python demo/01_simple_tool_call.py
+
+# 运行意图识别
+python demo/02_intent_recognition.py
+
+# 运行多轮信息补全
+python demo/03_multi_round_info_completion.py
+
+# 运行Skill和工具路由
+python demo/04_skill_tool_router.py
+
+# 运行进阶管理功能
+python demo/05_advanced_management.py
+```
+
+## 完整流程
+
+```
+用户输入 → IntentRecognizer → 意图分析
+                                    ↓
+                           信息完整？──否──→ 追问用户
+                              ↓是
+                           Router → 路由选择
+                                    ↓
+                           Skill + Tool → 执行
+                                    ↓
+                              返回结果
+```
+
+## 设计要点
+
+### 意图识别维度
+
+| 维度 | 作用 |
+|------|------|
+| intent | 回答"用户想办什么" |
+| provided_info | 回答"已经给了哪些信息" |
+| missing_info | 回答"还缺哪些信息"，含歧义检测 |
+| confidence | 回答"置信度够不够"，含分级和理由 |
+| execution | 回答"能不能继续执行"，含下一步动作 |
+
+### 置信度分级
+
+- **high**: ≥0.85
+- **medium**: 0.6-0.85
+- **low**: <0.6
+
+### 下一步动作
+
+- **execute**: 信息充分，直接执行
+- **ask_user**: 缺少必要信息，需追问
+- **clarify**: 信息有歧义，需确认
+- **escalate**: 超出能力范围，转人工
+
+## 扩展建议
+
+1. **接入真实LLM**: 在 `IntentRecognizer` 中接入真实LLM客户端替代mock实现
+2. **动态工具加载**: 支持从配置文件动态加载工具和Skill
+3. **权限控制**: 在Skill和工具注册时添加权限校验
+4. **监控日志**: 为工具调用添加详细日志记录
+5. **缓存机制**: 对重复查询结果进行缓存优化
