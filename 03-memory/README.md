@@ -99,12 +99,15 @@ print(result["decisions"])     # 加载决策（含原因）
 
 | 问题 | Demo方案 | 生产方案 | 文档 |
 |------|---------|---------|------|
-| 分布式一致性 | 文件存储(单机) | Redis+DB+乐观锁 | [文档第三章](docs/engineering_notes.md) |
-| 向量检索准确性 | TF-IDF+余弦 | Embedding+Rerank | [文档第四章](docs/engineering_notes.md) |
-| Token预算管理 | 固定比例分配 | 动态调整+增量加载 | [文档第二章](docs/engineering_notes.md) |
-| 记忆加载策略 | 5种策略(FULL/PARTIAL/ON_DEMAND/CACHED/SKIP) | +增量加载+异步预取 | [文档第五章](docs/engineering_notes.md) |
-| 记忆更新覆盖 | 直接覆盖 | 版本化/LLM合并 | [文档第六章](docs/engineering_notes.md) |
-| STM→LTM转换 | 直接搬运 | LLM摘要压缩 | [文档第七章](docs/engineering_notes.md) |
+| **存储方案** | JSON文件+Python内存 | Redis+PostgreSQL+Milvus | [存储设计文档](docs/storage_design.md) |
+| **中间件选择** | 零依赖 | Redis(短期)/PostgreSQL(长期)/Milvus(向量) | [存储设计文档](docs/storage_design.md) |
+| **模型设计** | TF-IDF字符级分词 | Embedding(text-embedding-3-small)+Rerank | [存储设计文档](docs/storage_design.md) |
+| **分布式一致性** | 文件存储(单机) | Redis+DB+乐观锁 | [工程问题文档第三章](docs/engineering_notes.md) |
+| **向量检索准确性** | TF-IDF+余弦 | Embedding+Rerank | [工程问题文档第四章](docs/engineering_notes.md) |
+| **Token预算管理** | 固定比例分配 | 动态调整+增量加载 | [工程问题文档第二章](docs/engineering_notes.md) |
+| **记忆加载策略** | 5种策略 | +增量加载+异步预取 | [工程问题文档第五章](docs/engineering_notes.md) |
+| **记忆更新覆盖** | 直接覆盖 | 版本化/LLM合并 | [工程问题文档第六章](docs/engineering_notes.md) |
+| **STM→LTM转换** | 直接搬运 | LLM摘要压缩 | [工程问题文档第七章](docs/engineering_notes.md) |
 
 ## 演进路径
 
