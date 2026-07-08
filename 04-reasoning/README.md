@@ -1,61 +1,136 @@
-# 04 推理策略（Reasoning）
+# 04 推理系统（Reasoning）
 
 ## 定义
 
-**推理策略**是指 Agent 在行动前进行结构化思考的方法。单纯依赖 LLM 的直觉生成容易出错，显式推理能让 Agent 分解复杂问题、检查中间步骤、修正错误，从而提升可靠性和可解释性。
+**推理系统**是 Agent 拆解复杂问题、规划执行步骤、动态决策的能力。仅有工具调用是"按指令行动"，加上推理才能"主动思考"。
 
-核心概念：
-- **CoT（Chain-of-Thought）**：要求 LLM 显式输出思考过程，再给出答案，适用于数学、逻辑题。
-- **ReAct（Reasoning + Acting）**：将推理（Thought）和行动（Action）交错进行，Agent 根据观察结果动态调整下一步。
-- **Plan-and-Solve**：先制定完整计划，再按步骤执行，适用于多步骤、依赖关系明确的任务。
+三种核心推理方式：
+- **CoT (Chain of Thought)**：单次LLM调用 + 逐步思考
+- **ReAct (Reasoning + Acting)**：思考 → 行动 → 观察 的循环
+- **Plan-and-Solve**：先规划后执行
 
-## 示例
+## 架构设计
 
-### Demo 列表
-
-| Demo | 说明 | 依赖 |
-|------|------|------|
-| `demo/01_cot_basic.py` | 零样本 CoT 提示 | `01-foundation/skill/` |
-| `demo/02_react_loop.py` | ReAct 推理-行动循环 | `01-foundation/skill/`, `02-tool-use/skill/` |
-| `demo/03_plan_and_solve.py` | 先规划后执行 | `01-foundation/skill/`, `02-tool-use/skill/` |
-
-### 核心代码片段
-
-```python
-# skill/reasoning_engine.py 设计目标：可插拔的推理策略引擎
-from abc import ABC, abstractmethod
-from typing import List, Dict, Any
-
-class ReasoningEngine(ABC):
-    @abstractmethod
-    def think(self, task: str, context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        返回思考步骤列表，每个步骤包含：
-        - thought: 当前思考内容
-        - action: 下一步行动（可选）
-        - observation: 行动后的观察（由外部填充）
-        """
-        pass
+```
+用户输入
+  │
+  ▼
+[02-tool-use] IntentRecognizer → intent
+  │
+  ▼
+┌────────────────────────────────────────────────────┐
+│              ReasoningRouter（推理路由）             │
+│  根据 intent 自动选择最合适的推理方式                  │
+└────┬──────────────┬──────────────┬─────────────────┘
+     │              │              │
+     ▼              ▼              ▼
+  ┌──────┐    ┌────────┐    ┌──────────────┐
+  │ CoT  │    │ ReAct  │    │ Plan&Solve   │
+  │ 1次  │    │ N次    │    │ 1+N+1次      │
+  │ LLM  │    │ LLM+工具│    │ LLM          │
+  └──────┘    └────────┘    └──────────────┘
+     │              │              │
+     └──────────────┴──────────────┘
+                    │
+                    ▼
+           ReasoningResult
+           (steps + final_answer)
 ```
 
-## 企业应用注意点
+## 核心组件
 
-1. **可解释性**：推理过程是 Agent 可解释性的核心。生产环境应保留 Thought 日志，便于业务人员理解 Agent 为何做出某决策。
-2. **成本权衡**：显式推理会增加 Token 消耗和延迟。对简单任务可降级为直接生成；对关键任务强制使用 ReAct 或 Plan-and-Solve。
-3. **错误回退**：推理链中某一步失败时，需设计回退策略（如重试、人工介入、切换到备用方案），而非让 Agent 无限循环。
-4. **提示词工程**：推理策略高度依赖提示词模板。需建立提示词版本管理和 A/B 测试机制，避免未经测试的提示词上线。
-5. **幻觉控制**：LLM 可能在推理过程中虚构事实。对关键推理步骤，要求引用可信来源（如知识库、工具返回结果）。
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| BaseReasoner | [base_reasoner.py](skill/base_reasoner.py) | 推理器基类，定义统一接口 |
+| Step / ReasoningResult | [base_reasoner.py](skill/base_reasoner.py) | 步骤和结果数据结构 |
+| CoTReasoner | [cot_reasoner.py](skill/cot_reasoner.py) | 思维链推理 |
+| ReActReasoner | [react_reasoner.py](skill/react_reasoner.py) | 思考+行动循环 |
+| PlanAndSolveReasoner | [plan_solve_reasoner.py](skill/plan_solve_reasoner.py) | 规划+求解+验证 |
+| ReasoningRouter | [reasoning_router.py](skill/reasoning_router.py) | 推理路由 + 工具管理 |
+| ToolRegistry | [reasoning_router.py](skill/reasoning_router.py) | 工具注册器 |
 
-## 应用场景推演
+## 三种推理方式对比
 
-### 场景：合规审查 Agent
-企业合同审查需要多步推理：
-1. **Plan**：先识别合同类型，再提取关键条款，最后逐条比对合规规则。
-2. **ReAct**：若某条款模糊，调用法律数据库查询判例；根据查询结果决定是标记风险还是继续审查。
-3. **CoT**：在输出最终审查意见前，要求 LLM 逐步说明每条风险的依据。
+| 维度 | CoT | ReAct | Plan-and-Solve |
+|------|-----|-------|----------------|
+| LLM调用 | 1次 | N次 | 1+N+1次 |
+| 工具调用 | 0次 | N次 | 0~N次 |
+| 适用场景 | 数学/逻辑/解释 | 实时查询/工具交互 | 复杂规划/多步任务 |
+| 优点 | 快、省、可解释 | 灵活、可与外部交互 | 结构化、可审核 |
+| 局限 | 不能查外部信息 | 可能死循环 | 计划可能不准确 |
 
-**注意点**：法律领域容错率极低，所有推理步骤和依据必须留痕，供律师复核；幻觉可能导致法律风险，关键判断必须引用真实条款。
+## 加载路由策略
 
-### 演进路径
+| 意图类型 | 推理方式 | 典型场景 |
+|---------|---------|---------|
+| greeting / thanks | NONE | 闲聊/致谢 |
+| qa / math / logic | CoT | 简单问答 |
+| weather / search / calculation | ReAct | 工具查询 |
+| travel_plan / research / complex | Plan-and-Solve | 复杂任务 |
+
+## Demo 列表
+
+| Demo | 说明 | 运行 |
+|------|------|------|
+| 01 | CoT 推理（数学/逻辑） | `python demo/01_cot_reasoning.py` |
+| 02 | ReAct 推理（工具调用） | `python demo/02_react_reasoning.py` |
+| 03 | Plan-and-Solve 推理 | `python demo/03_plan_solve_reasoning.py` |
+| 04 | 多轮会话中的推理 | `python demo/04_multi_turn_reasoning.py` |
+| 05 | 意图驱动的推理路由（进阶） | `python demo/05_intent_driven_routing.py` |
+
+## 快速使用
+
+```python
+from skill import ReasoningRouter, ToolRegistry
+
+# 创建路由
+router = ReasoningRouter()
+
+# 注册工具
+def get_weather(params):
+    return f"{params.get('city')} 28度 晴"
+
+router.register_tool("get_weather", get_weather, "查询天气")
+
+# 一站式推理
+result = router.reason(
+    user_input="北京今天天气怎么样？",
+    intent="weather_query"  # 来自 02-tool-use
+)
+
+print(result.final_answer)    # 最终答案
+print(result.trace())         # 推理轨迹
+print(f"LLM调用: {result.total_llm_calls}, 工具调用: {result.total_tool_calls}")
+```
+
+## 工程关注点
+
+| 问题 | 解决方案 | 文档 |
+|------|---------|------|
+| 死循环 | 连续3步同action强制停止 + max_steps限制 | [工程文档第2.1节](docs/engineering_notes.md) |
+| 成本控制 | 路由选择（NONE < CoT < ReAct < Plan-Solve） | [工程文档第2.2节](docs/engineering_notes.md) |
+| 可解释性 | trace() 输出步骤 + 计划可审核 | [工程文档第2.3节](docs/engineering_notes.md) |
+| 工具选择 | 清晰工具描述 + Few-shot + 校验 | [工程文档第2.4节](docs/engineering_notes.md) |
+| 状态管理 | 会话级Reasoner + 上下文传递 | [工程文档第2.5节](docs/engineering_notes.md) |
+| 超时 | 多级限制（步数/时间）+ 降级策略 | [工程文档第2.6节](docs/engineering_notes.md) |
+| 结果合并 | Self-Consistency + 置信度评分 | [工程文档第2.7节](docs/engineering_notes.md) |
+
+## 监控指标
+
+- **性能**：成功率、平均LLM调用次数、平均工具调用次数、延迟分布
+- **质量**：答案准确率、工具选择正确率、用户满意度
+- **成本**：单次推理成本、推理方式分布、Token使用
+
+## 与前几章的联动
+
+| 章节 | 联动方式 |
+|------|---------|
+| 01-foundation | LLM客户端统一接入 |
+| 02-tool-use | IntentRecognizer → ReasoningRouter → 工具调用 |
+| 03-memory | 推理时加载记忆，推理结果入记忆 |
+| **05-（下一章）** | 推理结果驱动行动 |
+
+## 演进路径
+
 - 当前层让 Agent"想得好"。
-- 下一章（05-agent-core）将把推理、工具、记忆组合成完整的 Agent 运行循环。
+- 下一章将让 Agent 基于推理结果"做得好"（行动执行）。

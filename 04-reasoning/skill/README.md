@@ -1,29 +1,54 @@
-# skill: reasoning_engine
+# skill: reasoning
 
 ## 设计目标
 
-提供可插拔的推理策略，使 Agent 能够根据任务复杂度选择不同的思考方式（CoT、ReAct、Plan-and-Solve）。
+为 Agent 提供多种推理方式（CoT/ReAct/Plan-and-Solve），按需选择最优策略。
 
-## 接口清单
+## 模块清单
 
 | 文件 | 职责 |
 |------|------|
-| `reasoning_engine.py` | 抽象基类 `ReasoningEngine` |
-| `cot_engine.py` | Chain-of-Thought 实现 |
-| `react_engine.py` | ReAct 推理-行动循环实现 |
-| `plan_and_solve_engine.py` | 先规划后执行实现 |
+| `base_reasoner.py` | 抽象基类 + Step/ReasoningResult 数据结构 |
+| `cot_reasoner.py` | CoT 思维链推理（1次LLM调用） |
+| `react_reasoner.py` | ReAct 思考+行动循环（LLM+工具） |
+| `plan_solve_reasoner.py` | Plan-and-Solve 规划+求解+验证 |
+| `reasoning_router.py` | 推理路由 + ToolRegistry |
+
+## 三种推理方式
+
+```
+CoT:           Q → [Thought1, Thought2, ...] → A
+ReAct:         Q → [T-A-O]×N → A
+Plan-and-Solve: Q → Plan → [Solve1, Solve2, ...] → Verify → A
+```
 
 ## 使用方式
 
 ```python
-from skill.reasoning_engine import ReasoningEngine
-from skill.react_engine import ReActEngine
+from skill import ReasoningRouter, ToolRegistry
 
-engine: ReasoningEngine = ReActEngine(llm_client, tool_registry)
-steps = engine.think("帮我订一张去上海的机票", context={})
+router = ReasoningRouter()
+router.register_tool("get_weather", get_weather, "查询天气")
+
+result = router.reason(
+    user_input="北京今天天气怎么样？",
+    intent="weather_query"
+)
+print(result.final_answer)
+print(result.trace())  # 推理轨迹
 ```
+
+## 路由决策
+
+| 意图 | 推理方式 | LLM 调用 |
+|------|---------|---------|
+| greeting/thanks | NONE | 0 |
+| qa/math/logic | CoT | 1 |
+| weather/search/calc | ReAct | N |
+| travel/research | Plan-Solve | N+2 |
 
 ## 边界约束
 
-- 推理引擎只负责生成 Thought / Plan，不直接执行工具或修改记忆。
-- 需接受 `llm_client: BaseLLMClient` 作为依赖注入，禁止内部实例化具体客户端。
+- LLM 客户端可插拔（None 时使用 mock）
+- max_steps 限制防止死循环
+- 工具调用失败有错误处理
