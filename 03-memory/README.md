@@ -39,12 +39,14 @@
 | 组件 | 文件 | 职责 |
 |------|------|------|
 | BaseMemory | [base_memory.py](skill/base_memory.py) | 抽象基类，定义统一接口 |
-| ShortTermMemory | [short_term_memory.py](skill/short_term_memory.py) | 内存滑动窗口，自动驱逐 |
-| LongTermMemory | [long_term_memory.py](skill/long_term_memory.py) | 文件持久化，关键词搜索 |
-| UserProfile | [user_profile.py](skill/user_profile.py) | 基本信息/偏好/实体/标签 |
+| **EntityProfile** | [entity_profile.py](skill/entity_profile.py) | **泛化主体画像（用户/项目/产品/团队/场景）** |
+| **UserProfile** | [user_profile.py](skill/user_profile.py) | 向后兼容的 UserProfile（EntityProfile 子类） |
+| **ShortTermMemory** | [short_term_memory.py](skill/short_term_memory.py) | **会话段滚动+信息密度降噪（新版）** |
+| **LongTermMemory** | [long_term_memory.py](skill/long_term_memory.py) | **集成 MemoryCompressor，自动去重/合并/覆盖** |
+| **MemoryCompressor** | [memory_compressor.py](skill/memory_compressor.py) | **SKIP/MERGE/REPLACE/APPEND 四种决策** |
 | VectorMemory | [vector_memory.py](skill/vector_memory.py) | 字符级分词，混合相似度搜索 |
-| **MemoryLoader** | [memory_loader.py](skill/memory_loader.py) | **加载策略决策（FULL/PARTIAL/ON_DEMAND/CACHED/SKIP）** |
-| **MemoryInjector** | [memory_injector.py](skill/memory_injector.py) | **Token 预算管理，Prompt 构建** |
+| **MemoryLoader** | [memory_loader.py](skill/memory_loader.py) | 加载策略决策（FULL/PARTIAL/ON_DEMAND/CACHED/SKIP） |
+| **MemoryInjector** | [memory_injector.py](skill/memory_injector.py) | Token 预算管理，Prompt 构建 |
 | MemoryManager | [memory_manager.py](skill/memory_manager.py) | 统一管理，STM→LTM 转换 |
 
 ## 加载时序设计
@@ -66,12 +68,15 @@
 
 | Demo | 说明 | 运行 |
 |------|------|------|
-| 01 | 短期记忆基础 | `python demo/01_short_term_memory.py` |
+| 01 | 短期记忆基础（会话段版） | `python demo/01_short_term_memory.py` |
 | 02 | 长期记忆 CRUD + 搜索 | `python demo/02_long_term_memory.py` |
 | 03 | 用户画像管理 | `python demo/03_user_profile.py` |
 | 04 | 向量化记忆语义搜索 | `python demo/04_vector_memory.py` |
 | 05 | 多记忆协同 + 多轮对话 | `python demo/05_memory_coordination.py` |
 | 06 | 加载策略与时序演示 | `python demo/06_loading_strategy.py` |
+| 07 | **泛化实体画像（用户/项目/产品）** | `python demo/07_entity_profile.py` |
+| 08 | **长期记忆压缩与去噪** | `python demo/08_long_term_compression.py` |
+| 09 | **短期记忆会话段降噪与滚动** | `python demo/09_short_term_segments.py` |
 
 ## 快速使用
 

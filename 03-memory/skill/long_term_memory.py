@@ -1,32 +1,33 @@
 """
-长期记忆（Long-Term Memory）
+长期记忆（Long-Term Memory）- 集成压缩器版
 
-特点：
-- 基于文件持久化，跨会话保留
-- 支持增删改查 + 关键词搜索
-- 按时间戳排序，优先返回最新记忆
+在原版基础上集成 MemoryCompressor：
+  - add() 时先过压缩器决策（SKIP/MERGE/REPLACE/APPEND）
+  - 自动去重、合并、覆盖
+  - 同时同步向量索引
 
 加载时序：部分加载，只取最近 N 条（非全量）
 Token 策略：占总预算 25%
-写入策略：异步写入（先写内存，定期 flush 到文件）
-
-工程关注点：
-- 分布式场景下多实例写入需乐观锁/版本号
-- 文件存储仅适合单机 Demo；生产应换 Redis/数据库
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 import json
 import os
 from .base_memory import BaseMemory, MemoryEntry
+from .memory_compressor import MemoryCompressor, CompressAction
 
 
 class LongTermMemory(BaseMemory):
-    def __init__(self, storage_path: Optional[str] = None):
+    def __init__(
+        self,
+        storage_path: Optional[str] = None,
+        compressor: Optional[MemoryCompressor] = None
+    ):
         self._entries: List[MemoryEntry] = []
         self.storage_path = storage_path or os.path.join(
             os.path.dirname(__file__), "..", "data", "long_term_memory.json"
         )
+        self.compressor = compressor or MemoryCompressor()
         self._ensure_storage_dir()
         self.load()
 
@@ -35,7 +36,48 @@ class LongTermMemory(BaseMemory):
         if directory and not os.path.exists(directory):
             os.makedirs(directory)
 
-    def add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    def add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
+        """
+        添加记忆（带压缩决策）
+
+        返回：(是否真正入库, 决策原因)
+        """
+        existing = [(i, e.content) for i, e in enumerate(self._entries)]
+        result = self.compressor.compress(content, existing)
+
+        if result.action == CompressAction.SKIP:
+            return (False, result.reason)
+
+        if result.action == CompressAction.APPEND:
+            entry = MemoryEntry(content=result.final_content, metadata=metadata or {})
+            self._entries.append(entry)
+            self.save()
+            return (True, result.reason)
+
+        if result.action == CompressAction.MERGE:
+            idx = result.target_index
+            if idx is not None and 0 <= idx < len(self._entries):
+                self._entries[idx].content = result.final_content
+                self._entries[idx].timestamp = datetime.now()
+                if metadata:
+                    self._entries[idx].metadata.update(metadata)
+                self.save()
+                return (True, result.reason)
+
+        if result.action == CompressAction.REPLACE:
+            idx = result.target_index
+            if idx is not None and 0 <= idx < len(self._entries):
+                self._entries[idx].content = result.final_content
+                self._entries[idx].timestamp = datetime.now()
+                if metadata:
+                    self._entries[idx].metadata = metadata
+                self.save()
+                return (True, result.reason)
+
+        return (False, "未匹配的 action")
+
+    def force_add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """绕过压缩器直接添加（用于已确认要入库的内容）"""
         entry = MemoryEntry(content=content, metadata=metadata or {})
         self._entries.append(entry)
         self.save()
@@ -47,7 +89,6 @@ class LongTermMemory(BaseMemory):
         return sorted(self._entries, key=lambda e: e.timestamp, reverse=True)[:limit]
 
     def search(self, query: str, top_k: int = 5) -> List[tuple]:
-        """关键词搜索，返回 (entry, score) 列表"""
         results = []
         query_lower = query.lower()
         for entry in self._entries:
@@ -96,13 +137,11 @@ class LongTermMemory(BaseMemory):
         return "\n".join(lines)
 
     def save(self) -> None:
-        """持久化到文件"""
         data = {"entries": [e.to_dict() for e in self._entries]}
         with open(self.storage_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def load(self) -> None:
-        """从文件加载"""
         if os.path.exists(self.storage_path):
             with open(self.storage_path, "r", encoding="utf-8") as f:
                 data = json.load(f)

@@ -2,8 +2,8 @@
 
 演示：
 - 添加对话消息到短期记忆
-- 滑动窗口自动驱逐旧消息
-- Token 限制保护
+- 会话段自动滚动（新版）
+- 信息密度评估
 - 生成对话历史上下文
 """
 import os
@@ -16,10 +16,10 @@ from skill import ShortTermMemory
 
 def main():
     print("=" * 60)
-    print("Demo 1: 短期记忆基础")
+    print("Demo 1: 短期记忆基础（会话段版）")
     print("=" * 60)
 
-    stm = ShortTermMemory(max_entries=5, max_tokens=200)
+    stm = ShortTermMemory(max_segments=3, max_tokens_per_segment=200)
 
     print("\n[1] 添加 3 轮对话")
     stm.add_message("user", "你好，查北京天气")
@@ -27,13 +27,13 @@ def main():
     stm.add_message("user", "明天呢？")
     stm.add_message("assistant", "明天多云，26°C")
 
-    print(f"  条目数: {stm.size()}, Token: {stm.estimate_tokens()}")
+    print(f"  段数: {stm.segment_count()}, 消息数: {stm.size()}, Token: {stm.estimate_tokens()}")
     print(f"  上下文:\n{stm.to_context()}")
 
-    print("\n[2] 超过 max_entries=5，自动驱逐最旧")
+    print("\n[2] 继续添加对话")
     for i in range(4):
         stm.add_message("user", f"第{i+3}轮对话内容")
-    print(f"  条目数: {stm.size()} (上限 5)")
+    print(f"  段数: {stm.segment_count()}, 消息数: {stm.size()}")
     print(f"  最新上下文:\n{stm.to_context()}")
 
     print("\n[3] 对话历史格式（OpenAI 格式）")
@@ -42,7 +42,7 @@ def main():
 
     print("\n[4] 清空记忆")
     stm.clear()
-    print(f"  清空后条目数: {stm.size()}")
+    print(f"  清空后段数: {stm.segment_count()}, 消息数: {stm.size()}")
 
     print("\n" + "=" * 60)
     print("Demo 1 完成")

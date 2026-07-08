@@ -24,7 +24,7 @@ from .vector_memory import VectorMemory
 class MemoryManager:
     def __init__(self, user_id: str = "default_user"):
         self.user_id = user_id
-        self.short_term = ShortTermMemory(max_entries=20, max_tokens=2000)
+        self.short_term = ShortTermMemory(max_segments=5, max_tokens_per_segment=2000)
         self.long_term = LongTermMemory()
         self.user_profile = UserProfile(user_id)
         self.vector_memory = VectorMemory()
