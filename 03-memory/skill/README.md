@@ -1,30 +1,53 @@
-# skill: memory_store
+# skill: memory
 
 ## 设计目标
 
-为 Agent 提供统一的记忆读写接口，支持短期记忆（会话上下文）、长期记忆（键值持久化）和向量记忆（语义检索）。
+为 Agent 提供多层记忆能力，支持短期记忆、长期记忆、用户画像、向量化记忆，以及智能加载策略和 Token 预算管理。
 
-## 接口清单
+## 模块清单
 
 | 文件 | 职责 |
 |------|------|
-| `memory_store.py` | 抽象基类 `MemoryStore` |
-| `short_term_memory.py` | 基于列表的滑动窗口上下文管理 |
-| `long_term_memory.py` | 基于文件/数据库的键值持久化 |
-| `vector_memory.py` | 向量存储 + 相似度检索（可对接 FAISS、Chroma 等） |
+| `base_memory.py` | 抽象基类 `BaseMemory` + 数据结构 `MemoryEntry` |
+| `short_term_memory.py` | 短期记忆：内存滑动窗口，Token 限制 |
+| `long_term_memory.py` | 长期记忆：文件持久化，关键词搜索 |
+| `user_profile.py` | 用户画像：基本信息/偏好/实体/标签 |
+| `vector_memory.py` | 向量记忆：字符级分词，混合相似度搜索 |
+| `memory_loader.py` | 加载决策器：FULL/PARTIAL/ON_DEMAND/CACHED/SKIP 策略 |
+| `memory_injector.py` | 注入器：Token 预算管理，Prompt 上下文构建 |
+| `memory_manager.py` | 管理器：统一管理四种记忆，STM→LTM 转换 |
+
+## 加载时序
+
+```
+请求 → MemoryLoader.decide() → MemoryInjector.inject() → Prompt 上下文
+
+加载顺序：
+  1. 用户画像 (CACHED)     — 小而关键，会话内缓存
+  2. 长期记忆 (PARTIAL)    — 取最近 N 条，不全量
+  3. 向量记忆 (ON_DEMAND)  — 仅查询意图时触发
+  4. 短期记忆 (FULL)       — 全量，放 Prompt 末尾（近因效应）
+```
 
 ## 使用方式
 
 ```python
-from skill.memory_store import MemoryStore
-from skill.short_term_memory import ShortTermMemory
+from skill import MemoryManager, MemoryLoader, MemoryInjector
 
-mem: MemoryStore = ShortTermMemory(max_messages=10)
-mem.add("用户问：今天天气如何？")
-context = mem.retrieve("天气", top_k=3)
+mm = MemoryManager("user_001")
+loader = MemoryLoader(total_token_budget=4000)
+injector = MemoryInjector(mm, loader)
+
+mm.set_profile("姓名", "张三", "basic_info")
+mm.add_long_term("用户喜欢吃川菜")
+mm.add_short_term("你好", "user")
+
+result = injector.inject("推荐美食", conversation_round=0, is_new_session=True)
+print(result["context"])
 ```
 
 ## 边界约束
 
-- 向量记忆的嵌入模型应可配置，禁止硬编码单一模型。
-- 长期记忆需支持异步写入，避免阻塞 Agent 主循环。
+- 向量记忆使用 TF-IDF，无语义理解；生产环境应替换为 Embedding 模型
+- 长期记忆使用文件存储；多实例场景需换 Redis/DB + 乐观锁
+- Token 估算为近似值（len/4）；精确值需使用 tiktoken 库
