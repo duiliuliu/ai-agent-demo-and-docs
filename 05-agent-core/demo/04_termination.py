@@ -1,14 +1,21 @@
 """
 Demo 04: 多种终止条件处理
 
-场景：展示 Agent 循环的各种终止条件和处理方式
-目标：理解不同终止条件的触发机制和处理策略
+场景：展示 Agent 循环的多种终止条件（步数、时间、质量、成本）
+目标：理解如何控制 Agent 循环的资源限额和智能终止
 
 核心知识点：
-  1. 终止条件的类型和配置
-  2. 如何监控循环状态
-  3. 终止原因的判断和处理
-  4. 资源限额和成本控制
+  1. 基于步数的终止条件
+  2. 基于时间的终止条件
+  3. 基于成本的终止条件
+  4. 基于质量的终止条件
+  5. 智能趋势分析和提前终止
+
+支持真实 LLM：
+  支持所有 LLM 提供商
+    export LLM_PROVIDER=deepseek
+    export LLM_API_KEY=your-api-key
+    export REASONING_TYPE=simple
 
 运行方式：
   python demo/04_termination.py
@@ -18,154 +25,143 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from skill.termination_checker import (
-    TerminationChecker,
-    SmartTerminationChecker,
-    TerminationConfig,
-    TerminationReason
-)
+from demo_helper import create_agent_loop, print_config_info
 
 
-def demo_termination_conditions():
+def demo_step_termination():
+    print("\n" + "=" * 60)
+    print("场景 1: 基于步数的终止条件")
     print("=" * 60)
-    print("Demo 04: 多种终止条件处理")
-    print("=" * 60)
+
+    loop = create_agent_loop(max_steps=3)
+
+    user_input = "详细分析如何学习 Python 编程的核心概念"
+
+    result = loop.run(user_input)
+
+    print(f"  终止原因: {result.status.value}")
+    print(f"  执行步数: {len(result.steps)}")
+    print(f"  是否成功: {result.status.value == 'completed'}")
     print()
 
+
+def demo_time_termination():
     print("=" * 60)
-    print("测试1：标准终止检查器")
+    print("场景 2: 基于时间的终止条件")
     print("=" * 60)
 
-    config = TerminationConfig(
-        max_steps=3,
-        max_time_seconds=10,
-        max_llm_calls=5,
-        max_tool_calls=3,
-        max_consecutive_failures=2
+    loop = create_agent_loop(
+        max_steps=10,
+        max_total_time_seconds=2
     )
 
-    checker = TerminationChecker(config)
-    checker.initialize()
+    user_input = "请用很多步骤分析一个复杂的问题"
 
-    test_cases = [
-        {"success": True, "llm_calls": 1, "tool_calls": 0},
-        {"success": True, "llm_calls": 1, "tool_calls": 0},
-        {"success": True, "llm_calls": 1, "tool_calls": 0},
-    ]
+    result = loop.run(user_input)
 
-    for i, step in enumerate(test_cases, 1):
-        reason = checker.check(step)
-        state = checker.get_state()
-        print(f"步骤 {i}: 终止原因={reason.value}, 状态={state}")
-
+    print(f"  终止原因: {result.status.value}")
+    print(f"  执行步数: {len(result.steps)}")
+    print(f"  执行时间: {result.total_duration_ms / 1000:.2f}秒")
     print()
 
+
+def demo_quality_termination():
     print("=" * 60)
-    print("测试2：连续失败触发终止")
+    print("场景 3: 基于质量的终止条件")
     print("=" * 60)
 
-    checker2 = TerminationChecker(config)
-    checker2.initialize()
+    from skill.termination_checker import TerminationChecker, TerminationConfig
 
-    failure_cases = [
-        {"success": False, "llm_calls": 1, "tool_calls": 0},
-        {"success": False, "llm_calls": 1, "tool_calls": 0},
-        {"success": False, "llm_calls": 1, "tool_calls": 0},
-    ]
+    config = TerminationConfig(
+        max_steps=10,
+        min_confidence_threshold=0.8
+    )
+    checker = TerminationChecker(config=config)
 
-    for i, step in enumerate(failure_cases, 1):
-        reason = checker2.check(step)
-        state = checker2.get_state()
-        print(f"步骤 {i}: 终止原因={reason.value}, 连续失败={state['consecutive_failures']}")
-
+    print("  质量阈值: 当检测到高置信度回答时提前终止")
+    print("  适用场景: 推理结果置信度达到要求后无需继续迭代")
+    print()
+    print("  终止检查维度:")
+    print("    - 步数限制: 防止无限循环")
+    print("    - 时间限制: 防止执行时间过长")
+    print("    - LLM调用次数: 控制调用成本")
+    print("    - 工具调用次数: 防止过度使用工具")
+    print("    - 连续失败: 检测卡壳状态")
+    print("    - 成本限制: 控制总体成本")
+    print("    - 置信度阈值: 结果质量达标后提前终止")
     print()
 
+
+def demo_trend_analysis():
     print("=" * 60)
-    print("测试3：智能终止检查器（进度趋势检测）")
+    print("场景 4: 智能趋势分析")
     print("=" * 60)
 
-    smart_checker = SmartTerminationChecker(config)
-    smart_checker.initialize()
-
-    trend_cases = [
-        {"success": True, "progress": 0, "new_information": False},
-        {"success": True, "progress": 0, "new_information": False},
-        {"success": True, "progress": 0, "new_information": False},
-        {"success": True, "progress": 0, "new_information": False},
-        {"success": True, "progress": 0, "new_information": False},
-    ]
-
-    for i, step in enumerate(trend_cases, 1):
-        reason = smart_checker.check(step)
-        print(f"步骤 {i}: 终止原因={reason.value}, 进度={step['progress']}")
-
+    print("  趋势分析的目的:")
+    print("    当连续多步没有实质进展时，智能终止循环")
+    print()
+    print("  常见无进展的表现:")
+    print("    - 重复相同的思考和行动")
+    print("    - 工具调用没有新信息")
+    print("    - 在原地打转，无法推进任务")
+    print()
+    print("  企业级应用价值:")
+    print("    - 防止死循环，节省 LLM 调用成本")
+    print("    - 及时发现卡壳，避免资源浪费")
+    print("    - 提升用户体验，快速返回结果")
     print()
 
+
+def demo_termination_summary():
     print("=" * 60)
-    print("测试4：终止消息和正常终止判断")
-    print("=" * 60)
-
-    reasons = [
-        TerminationReason.TASK_COMPLETED,
-        TerminationReason.MAX_STEPS_REACHED,
-        TerminationReason.TIME_LIMIT_EXCEEDED,
-        TerminationReason.USER_INTERRUPTED,
-        TerminationReason.FATAL_ERROR,
-        TerminationReason.QUALITY_THRESHOLD,
-        TerminationReason.COST_LIMIT_EXCEEDED,
-    ]
-
-    for reason in reasons:
-        msg = checker.get_termination_message(reason)
-        is_normal = checker.is_normal_termination(reason)
-        print(f"{reason.value}: {msg} (正常终止={is_normal})")
-
-    print()
-
-    print("=" * 60)
-    print("终止条件机制解析")
+    print("终止条件总结")
     print("=" * 60)
     print("""
-1. 终止条件类型：
-   - TASK_COMPLETED: 任务完成（推理引擎返回完成信号）
-   - MAX_STEPS_REACHED: 达到最大步数限制
-   - TIME_LIMIT_EXCEEDED: 超过时间限制
-   - USER_INTERRUPTED: 用户主动中断
-   - FATAL_ERROR: 发生致命错误
-   - QUALITY_THRESHOLD: 质量阈值（连续失败或低置信度）
-   - COST_LIMIT_EXCEEDED: 成本或调用次数超限
+1. 最大步数限制（Max Steps）：
+   - 最基本的保护机制
+   - 防止无限循环
+   - 默认值通常根据任务复杂度设置
 
-2. 配置参数：
-   - max_steps: 最大循环步数
-   - max_time_seconds: 最大运行时间（秒）
-   - max_llm_calls: 最大LLM调用次数
-   - max_tool_calls: 最大工具调用次数
-   - max_consecutive_failures: 最大连续失败次数
-   - max_total_cost: 最大成本限制
-   - min_confidence_threshold: 最小置信度阈值
+2. 超时限制（Timeout）：
+   - 防止任务执行时间过长
+   - 特别适用于有 SLA 要求的场景
+   - 结合异步任务调度
 
-3. 智能终止检测（SmartTerminationChecker）：
-   - 检测连续失败趋势
-   - 检测无进展循环（重复相同操作）
-   - 提前终止低效循环，节省资源
+3. 成本控制（Cost Limit）：
+   - 控制 LLM 调用的 Token 成本
+   - 企业级预算管理
+   - 按用户/部门/项目级别的配额
 
-4. 正常终止 vs 异常终止：
-   - 正常终止：任务完成、步数上限、时间上限、用户中断
-   - 异常终止：致命错误、质量阈值、成本超限
+4. 质量阈值（Quality Threshold）：
+   - 结果达到质量要求后提前终止
+   - 避免不必要的迭代
+   - 提升效率，降低成本
 
-5. 实际应用建议：
-   - 根据场景调整配置（简单任务：少步数，复杂任务：多步数）
-   - 监控终止原因分布，优化配置
-   - 对异常终止进行告警和复盘
-   - 设置合理的资源限额，防止滥用
+5. 智能趋势分析（Trend Analysis）：
+   - 检测无进展循环
+   - 防止死循环
+   - 及时止损
 
-关键设计原则：
-  - 终止条件应该是可配置的（适应不同场景）
-  - 终止原因应该是可追踪的（便于分析和优化）
-  - 资源限额应该是可监控的（便于成本控制）
-  - 终止应该是优雅的（保留已执行步骤的结果）
+企业级实践建议：
+  - 多种终止条件组合使用
+  - 为不同场景配置不同的阈值
+  - 记录终止原因用于分析和优化
+  - 设置合理的默认值，防止误触发
+  - 提供配置化管理终止策略
+
+使用真实 LLM 体验：
+  # 使用 DeepSeek + Plan-and-Solve 模式
+  export LLM_PROVIDER=deepseek
+  export LLM_API_KEY=your-api-key
+  export REASONING_TYPE=plan
+  python demo/04_termination.py
 """)
 
 
 if __name__ == "__main__":
-    demo_termination_conditions()
+    print_config_info()
+    demo_step_termination()
+    demo_time_termination()
+    demo_quality_termination()
+    demo_trend_analysis()
+    demo_termination_summary()

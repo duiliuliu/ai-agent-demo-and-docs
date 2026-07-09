@@ -1,14 +1,21 @@
 """
 Demo 02: 带工具调用的 Agent 循环
 
-场景：展示如何在 Agent 循环中集成工具调用
+场景：展示如何在 Agent 循环中集成工具调用（使用 ReAct 推理引擎）
 目标：理解工具调用在循环中的作用和流程
 
 核心知识点：
   1. 工具注册和调用机制
-  2. 工具调用结果如何反馈到循环中
-  3. 如何处理工具调用的返回值
-  4. 工具调用的统计和监控
+  2. ReAct 推理引擎的工作原理
+  3. 工具调用结果如何反馈到循环中
+  4. 如何处理工具调用的返回值
+
+支持真实 LLM：
+  设置环境变量即可使用真实 LLM + ReAct：
+    export LLM_PROVIDER=openai
+    export LLM_API_KEY=your-api-key
+    export LLM_MODEL=gpt-3.5-turbo
+    export REASONING_TYPE=react
 
 运行方式：
   python demo/02_loop_with_tools.py
@@ -18,7 +25,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from skill.agent_loop import AgentLoop
+from demo_helper import create_agent_loop, print_config_info
 
 
 class MockToolRegistry:
@@ -27,6 +34,11 @@ class MockToolRegistry:
             "search_weather": self._search_weather,
             "search_flight": self._search_flight,
             "calculate": self._calculate
+        }
+        self._descriptions = {
+            "search_weather": "查询指定城市的天气信息，参数：city（城市名）",
+            "search_flight": "查询航班信息，参数：from_city（出发城市）, to_city（目的城市）",
+            "calculate": "执行数学计算，参数：expression（数学表达式字符串）"
         }
 
     def call(self, tool_name: str, args: dict) -> str:
@@ -43,10 +55,10 @@ class MockToolRegistry:
         info = weather_data.get(city, {"temperature": "未知", "condition": "未知", "wind": "未知"})
         return f"{city}天气：{info['condition']}，温度{info['temperature']}，{info['wind']}"
 
-    def _search_flight(self, from_city: str, to_city: str) -> str:
+    def _search_flight(self, from_city: str = "", to_city: str = "") -> str:
         return f"从{from_city}到{to_city}的航班信息：CA1234，明天上午10:00起飞，票价500元"
 
-    def _calculate(self, expression: str) -> str:
+    def _calculate(self, expression: str = "") -> str:
         try:
             result = eval(expression)
             return f"计算结果: {expression} = {result}"
@@ -55,16 +67,13 @@ class MockToolRegistry:
 
 
 def demo_loop_with_tools():
-    print("=" * 60)
-    print("Demo 02: 带工具调用的 Agent 循环")
-    print("=" * 60)
-    print()
+    print_config_info()
 
     tool_registry = MockToolRegistry()
 
-    loop = AgentLoop(
+    loop = create_agent_loop(
         tool_registry=tool_registry,
-        max_steps=4
+        max_steps=6
     )
 
     user_input = "查询北京的天气，然后计算 100 + 200"
@@ -89,10 +98,11 @@ def demo_loop_with_tools():
    - 将工具函数注册到一个统一的注册表中
    - 本示例注册了三个工具：search_weather、search_flight、calculate
 
-2. 工具调用流程：
-   - Thought 阶段：推理引擎决定需要调用工具
-   - Action 阶段：AgentLoop 调用 tool_registry.call(tool_name, args)
-   - Observation 阶段：工具返回结果被作为下一步的观察输入
+2. ReAct 推理流程：
+   - Thought: 分析问题，决定需要调用哪个工具
+   - Action: 指定工具名称和参数
+   - Observation: 工具执行的结果
+   - 循环直到得到最终答案
 
 3. 工具调用统计：
    - total_tool_calls: 工具调用总次数
@@ -109,6 +119,13 @@ def demo_loop_with_tools():
   - 工具调用应该是幂等的（Idempotent）
   - 工具返回值应该是可序列化的
   - 工具应该有明确的输入输出规范
+
+使用真实 LLM 体验：
+  # 使用 OpenAI + ReAct 模式
+  export LLM_PROVIDER=openai
+  export LLM_API_KEY=sk-xxx
+  export REASONING_TYPE=react
+  python demo/02_loop_with_tools.py
 """)
 
 

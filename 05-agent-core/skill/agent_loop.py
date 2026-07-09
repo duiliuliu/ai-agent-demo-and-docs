@@ -9,13 +9,10 @@ Agent 核心循环（Agent Loop）
   │  ┌──────────────┐    ┌──────────────┐    ┌───────────┐ │
   │  │ Observation  │───▶│   Thought    │───▶│   Action  │ │
   │  │  (观察)      │    │   (思考)     │    │   (行动)  │ │
-  │  └──────────────┘    └──────────────┘    └─────┬─────┘ │
-  │         ^                                      │       │
-  │         │                                      ▼       │
-  │         └──────────────────────────────┬───────────────┤
-  │                                        │  Environment  │
-  │                                        │  (环境/工具)  │
-  │                                        └───────────────┘ │
+  │  └──────────────┘    └──────┬───────┘    └─────┬─────┘ │
+  │                            │  推理引擎           │       │
+  │                            ▼                   ▼       │
+  │                          ReAct/CoT       工具/记忆/子Agent │
   └─────────────────────────────────────────────────────────┘
 
 企业级特性：
@@ -25,11 +22,18 @@ Agent 核心循环（Agent Loop）
   - 状态持久化：每步状态持久化，支持断点续跑
   - 异常隔离：单步失败不崩溃整个循环
   - 可观测性：全链路追踪、指标采集、日志记录
+
+推理引擎集成：
+  - 支持 04-reasoning 模块的所有推理器（CoT/ReAct/Plan-and-Solve）
+  - 支持 01-foundation 模块的所有 LLM 客户端（OpenAI/智普/DeepSeek）
+  - 无推理引擎时使用内置模拟模式（便于学习和测试）
 """
 import time
 import uuid
 import signal
 import logging
+import sys
+import os
 from typing import Dict, Any, List, Optional, Callable, Union
 from dataclasses import dataclass, field
 from enum import Enum
@@ -80,6 +84,8 @@ class LoopStep:
     result: Any = None
     error: Optional[str] = None
     duration_ms: float = 0.0
+    llm_calls: int = 0
+    tool_calls: int = 0
 
 
 @dataclass
@@ -104,15 +110,15 @@ class LoopResult:
         ]
         for step in self.steps:
             lines.append(f"[步骤 {step.step_id}] {step.status}")
-            lines.append(f"  观察: {str(step.observation)[:100]}")
-            lines.append(f"  思考: {step.thought[:100]}")
+            lines.append(f"  思考: {step.thought[:200]}")
             if step.action:
                 lines.append(f"  行动: {step.action.type.value} - {step.action.name}")
             if step.result:
-                lines.append(f"  结果: {str(step.result)[:100]}")
+                result_str = str(step.result)
+                lines.append(f"  结果: {result_str[:200]}")
             if step.error:
                 lines.append(f"  ❌ 错误: {step.error}")
-            lines.append(f"  耗时: {step.duration_ms:.1f}ms")
+            lines.append(f"  耗时: {step.duration_ms:.1f}ms (LLM={step.llm_calls}, Tool={step.tool_calls})")
             lines.append("")
         if self.final_output:
             lines.append(f"★ 最终输出: {self.final_output}")
@@ -154,8 +160,8 @@ class AgentLoop:
         self._start_time: float = 0.0
         self._stop_event: bool = False
 
-        self._llm_call_count: int = 0
-        self._tool_call_count: int = 0
+        self._total_llm_calls: int = 0
+        self._total_tool_calls: int = 0
 
         self._setup_signal_handlers()
 
@@ -175,8 +181,8 @@ class AgentLoop:
         self._steps = []
         self._start_time = time.time()
         self._stop_event = False
-        self._llm_call_count = 0
-        self._tool_call_count = 0
+        self._total_llm_calls = 0
+        self._total_tool_calls = 0
 
         if self.on_loop_start:
             self.on_loop_start(session_id=self._session_id, user_input=user_input)
@@ -184,42 +190,117 @@ class AgentLoop:
         logger.info(f"开始 Agent 循环: session={self._session_id}, max_steps={self.max_steps}")
 
         try:
-            for step_idx in range(self.max_steps):
-                if self._stop_event:
-                    logger.info("循环被中断")
-                    break
-
-                elapsed = time.time() - self._start_time
-                if elapsed >= self.max_total_time:
-                    logger.warning(f"总时间超时: {elapsed:.1f}s > {self.max_total_time}s")
-                    break
-
-                step_result = self._execute_step(step_idx + 1, user_input, context)
-                self._steps.append(step_result)
-
-                if self.on_step_end:
-                    self.on_step_end(step=step_result)
-
-                if step_result.status == "completed":
-                    logger.info(f"步骤 {step_idx + 1} 完成")
-                    if step_result.action and step_result.action.type == ActionType.FINISH:
-                        return self._finalize(LoopStatus.COMPLETED, step_result.result)
-
-                elif step_result.status == "failed":
-                    logger.error(f"步骤 {step_idx + 1} 失败: {step_result.error}")
-
-                context = self._update_context(context, step_result)
-
-            if len(self._steps) >= self.max_steps:
-                return self._finalize(LoopStatus.COMPLETED, None, "达到最大步数")
-            elif self._stop_event:
-                return self._finalize(LoopStatus.CANCELLED, None, "用户中断")
+            if self.reasoning_engine:
+                return self._run_with_reasoning_engine(user_input, context)
             else:
-                return self._finalize(LoopStatus.COMPLETED, None, "时间耗尽")
+                return self._run_simple_loop(user_input, context)
 
         except Exception as e:
             logger.error(f"Agent 循环异常: {e}")
             return self._finalize(LoopStatus.FAILED, None, str(e))
+
+    def _run_with_reasoning_engine(self, user_input: str, context: Optional[Dict[str, Any]]) -> LoopResult:
+        if self.reasoning_engine is None:
+            return self._run_simple_loop(user_input, context)
+
+        has_tools = hasattr(self.reasoning_engine, 'tools') and self.reasoning_engine.tools
+        if self.tool_registry and hasattr(self.reasoning_engine, 'register_tool'):
+            if hasattr(self.tool_registry, '_tools'):
+                for name, func in self.tool_registry._tools.items():
+                    desc = getattr(self.tool_registry, '_descriptions', {}).get(name, "")
+                    if name not in self.reasoning_engine.tools:
+                        self.reasoning_engine.register_tool(name, func, desc)
+
+        result = self.reasoning_engine.reason(user_input, context)
+
+        steps = []
+        for i, step in enumerate(result.steps, 1):
+            action = self._step_to_action(step)
+            loop_step = LoopStep(
+                step_id=i,
+                status="completed" if step.final_answer or step.observation else "completed",
+                observation=step.observation or "",
+                thought=step.thought,
+                action=action,
+                result=step.final_answer or step.observation,
+                duration_ms=result.execution_time_ms / len(result.steps) if result.steps else 0,
+                llm_calls=1,
+                tool_calls=1 if step.action and step.final_answer is None else 0
+            )
+            steps.append(loop_step)
+
+            if self.on_step_start:
+                self.on_step_start(step_id=i)
+            if self.on_step_end:
+                self.on_step_end(step=loop_step)
+
+        self._steps = steps
+        self._total_llm_calls = result.total_llm_calls
+        self._total_tool_calls = result.total_tool_calls
+
+        status = LoopStatus.COMPLETED if result.success else LoopStatus.FAILED
+        error = None if result.success else result.error
+
+        return self._finalize(status, result.final_answer, error)
+
+    def _step_to_action(self, step) -> Optional[AgentAction]:
+        if step.final_answer:
+            return AgentAction(
+                type=ActionType.FINISH,
+                name="finish_task",
+                args={"final_answer": step.final_answer},
+                thought=step.thought
+            )
+        elif step.action:
+            return AgentAction(
+                type=ActionType.TOOL_CALL,
+                name=step.action,
+                args=step.action_input or {},
+                thought=step.thought
+            )
+        else:
+            return AgentAction(
+                type=ActionType.USER_RESPONSE,
+                name="respond",
+                args={"content": step.thought},
+                thought=step.thought
+            )
+
+    def _run_simple_loop(self, user_input: str, context: Optional[Dict[str, Any]]) -> LoopResult:
+        for step_idx in range(self.max_steps):
+            if self._stop_event:
+                logger.info("循环被中断")
+                break
+
+            elapsed = time.time() - self._start_time
+            if elapsed >= self.max_total_time:
+                logger.warning(f"总时间超时: {elapsed:.1f}s > {self.max_total_time}s")
+                break
+
+            step_result = self._execute_step(step_idx + 1, user_input, context)
+            self._steps.append(step_result)
+            self._total_llm_calls += step_result.llm_calls
+            self._total_tool_calls += step_result.tool_calls
+
+            if self.on_step_end:
+                self.on_step_end(step=step_result)
+
+            if step_result.status == "completed":
+                logger.info(f"步骤 {step_idx + 1} 完成")
+                if step_result.action and step_result.action.type == ActionType.FINISH:
+                    return self._finalize(LoopStatus.COMPLETED, step_result.result)
+
+            elif step_result.status == "failed":
+                logger.error(f"步骤 {step_idx + 1} 失败: {step_result.error}")
+
+            context = self._update_context(context, step_result)
+
+        if len(self._steps) >= self.max_steps:
+            return self._finalize(LoopStatus.COMPLETED, None, "达到最大步数")
+        elif self._stop_event:
+            return self._finalize(LoopStatus.CANCELLED, None, "用户中断")
+        else:
+            return self._finalize(LoopStatus.COMPLETED, None, "时间耗尽")
 
     def _execute_step(self, step_id: int, user_input: str, context: Optional[Dict[str, Any]]) -> LoopStep:
         step_start = time.time()
@@ -229,17 +310,24 @@ class AgentLoop:
 
         logger.debug(f"执行步骤 {step_id}")
 
+        llm_calls = 0
+        tool_calls = 0
+
         try:
             observation = self._observe(user_input, context)
             logger.debug(f"步骤 {step_id} 观察完成")
 
-            thought = self._think(observation, context)
+            thought = self._think_simple(observation, context)
+            if self.llm_client:
+                llm_calls = 1
             logger.debug(f"步骤 {step_id} 思考完成")
 
-            action = self._decide_action(thought, context)
+            action = self._decide_action_simple(thought, context)
             logger.debug(f"步骤 {step_id} 决策完成: {action.type.value}")
 
             result = self._execute_action(action)
+            if action.type == ActionType.TOOL_CALL:
+                tool_calls = 1
             logger.debug(f"步骤 {step_id} 执行完成")
 
             return LoopStep(
@@ -249,7 +337,9 @@ class AgentLoop:
                 thought=thought,
                 action=action,
                 result=result,
-                duration_ms=(time.time() - step_start) * 1000
+                duration_ms=(time.time() - step_start) * 1000,
+                llm_calls=llm_calls,
+                tool_calls=tool_calls
             )
 
         except Exception as e:
@@ -263,7 +353,9 @@ class AgentLoop:
                 action=None,
                 result=None,
                 error=error_msg,
-                duration_ms=(time.time() - step_start) * 1000
+                duration_ms=(time.time() - step_start) * 1000,
+                llm_calls=llm_calls,
+                tool_calls=tool_calls
             )
 
     def _observe(self, user_input: str, context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -275,25 +367,60 @@ class AgentLoop:
 
         return observation
 
-    def _think(self, observation: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str:
-        if self.reasoning_engine:
-            input_text = f"观察: {observation}\n上下文: {context}"
-            result = self.reasoning_engine.reason(input_text, context)
-            self._llm_call_count += result.total_llm_calls
-            return result.final_answer or result.steps[-1].thought if result.steps else ""
+    def _think_simple(self, observation: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str:
+        if self.llm_client:
+            prompt = self._build_simple_think_prompt(observation, context)
+            try:
+                response = self.llm_client.complete(prompt)
+                return response.content if hasattr(response, 'content') else str(response)
+            except Exception as e:
+                logger.warning(f"LLM调用失败，使用模拟: {e}")
+                return self._mock_think(observation)
         else:
-            return "这是一个思考步骤，需要推理引擎来生成具体的思考内容。"
+            return self._mock_think(observation)
 
-    def _decide_action(self, thought: str, context: Optional[Dict[str, Any]]) -> AgentAction:
-        if "完成" in thought or "结束" in thought or "总结" in thought:
+    def _build_simple_think_prompt(self, observation: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str:
+        user_input = observation.get("user_input", "")
+        history = observation.get("history", [])
+
+        history_text = ""
+        if history:
+            history_text = "\n历史对话:\n"
+            for h in history[-5:]:
+                history_text += f"  - {str(h)[:100]}\n"
+
+        return f"""你是一个AI助手。请根据以下信息进行思考，决定下一步该做什么。
+
+用户输入: {user_input}
+{history_text}
+请用"思考："开头，给出你的思考过程。
+如果已经得到最终答案，请用"最终答案："开头给出答案。
+"""
+
+    def _mock_think(self, observation: Dict[str, Any]) -> str:
+        user_input = observation.get("user_input", "")
+        history = observation.get("history", [])
+
+        if not history:
+            return f"思考：用户问了'{user_input}'，我需要先分析问题，然后给出回答。\n让我先整理一下思路。"
+        elif len(history) == 1:
+            return f"思考：根据之前的分析，我已经对'{user_input}'有了初步的理解。\n现在我需要整理信息，给出完整的回答。"
+        else:
+            return f"思考：我已经分析了'{user_input}'的各个方面。\n信息已经足够，我可以给出最终答案了。\n最终答案：经过综合分析，{user_input}的答案是多方面的，需要根据具体情况来判断。建议从多个角度考虑问题。"
+
+    def _decide_action_simple(self, thought: str, context: Optional[Dict[str, Any]]) -> AgentAction:
+        if "最终答案" in thought or "总结" in thought or "完成" in thought:
+            answer = thought
+            if "最终答案：" in thought:
+                answer = thought.split("最终答案：")[-1].strip()
             return AgentAction(
                 type=ActionType.FINISH,
                 name="finish_task",
-                args={"thought": thought},
+                args={"final_answer": answer},
                 thought=thought
             )
 
-        if "调用工具" in thought or "使用工具" in thought:
+        if "调用工具" in thought or "使用工具" in thought or "搜索" in thought:
             return AgentAction(
                 type=ActionType.TOOL_CALL,
                 name="search",
@@ -310,12 +437,17 @@ class AgentLoop:
 
     def _execute_action(self, action: AgentAction) -> Any:
         if action.type == ActionType.FINISH:
-            return action.args.get("thought", "")
+            return action.args.get("final_answer", action.args.get("thought", ""))
 
         elif action.type == ActionType.TOOL_CALL:
             if self.tool_registry:
-                self._tool_call_count += 1
-                return self.tool_registry.call(action.name, action.args)
+                self._total_tool_calls += 1
+                if hasattr(self.tool_registry, 'call'):
+                    return self.tool_registry.call(action.name, action.args)
+                elif hasattr(self.tool_registry, '_tools'):
+                    func = self.tool_registry._tools.get(action.name)
+                    if func:
+                        return func(**action.args)
             return f"工具调用模拟: {action.name}({action.args})"
 
         elif action.type == ActionType.USER_RESPONSE:
@@ -364,8 +496,8 @@ class AgentLoop:
             final_output=str(output) if output else None,
             error=error,
             total_duration_ms=total_duration,
-            total_llm_calls=self._llm_call_count,
-            total_tool_calls=self._tool_call_count
+            total_llm_calls=self._total_llm_calls,
+            total_tool_calls=self._total_tool_calls
         )
 
     def stop(self) -> None:
@@ -380,3 +512,79 @@ class AgentLoop:
 
     def get_step_count(self) -> int:
         return len(self._steps)
+
+
+def create_agent_loop(
+    llm_provider: str = "mock",
+    reasoning_type: str = "simple",
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+    **kwargs
+) -> AgentLoop:
+    """
+    便捷函数：创建一个配置好的 AgentLoop
+
+    Args:
+        llm_provider: LLM 提供商 (mock/openai/zhipu/deepseek)
+        reasoning_type: 推理类型 (simple/cot/react/plan)
+        api_key: API Key
+        base_url: API 基础 URL
+        model: 模型名称
+        **kwargs: 传递给 AgentLoop 的其他参数
+
+    Returns:
+        AgentLoop 实例
+    """
+    llm_client = None
+    reasoning_engine = None
+
+    if llm_provider != "mock":
+        foundation_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "01-foundation", "skill")
+        reasoning_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "04-reasoning", "skill")
+
+        sys.path.insert(0, os.path.abspath(foundation_path))
+        sys.path.insert(0, os.path.abspath(reasoning_path))
+
+        try:
+            if llm_provider == "openai":
+                from openai_client import OpenAIClient
+                llm_client = OpenAIClient(api_key=api_key, base_url=base_url, model=model or "gpt-3.5-turbo")
+            elif llm_provider == "zhipu":
+                from zhipu_client import ZhipuClient
+                llm_client = ZhipuClient(api_key=api_key, model=model or "glm-4")
+            elif llm_provider == "deepseek":
+                from deepseek_client import DeepSeekClient
+                llm_client = DeepSeekClient(api_key=api_key, base_url=base_url, model=model or "deepseek-chat")
+
+            if reasoning_type != "simple" and llm_client:
+                if reasoning_type == "cot":
+                    from cot_reasoner import CoTReasoner
+                    reasoning_engine = CoTReasoner(llm_client=LLMClientAdapter(llm_client), **kwargs)
+                elif reasoning_type == "react":
+                    from react_reasoner import ReActReasoner
+                    reasoning_engine = ReActReasoner(llm_client=LLMClientAdapter(llm_client), **kwargs)
+                elif reasoning_type == "plan":
+                    from plan_solve_reasoner import PlanAndSolveReasoner
+                    reasoning_engine = PlanAndSolveReasoner(llm_client=LLMClientAdapter(llm_client), **kwargs)
+        except ImportError as e:
+            logger.warning(f"导入失败，使用模拟模式: {e}")
+            llm_client = None
+            reasoning_engine = None
+
+    return AgentLoop(
+        reasoning_engine=reasoning_engine,
+        llm_client=llm_client,
+        **kwargs
+    )
+
+
+class LLMClientAdapter:
+    def __init__(self, llm_client):
+        self.client = llm_client
+
+    def generate(self, prompt: str, **kwargs) -> str:
+        response = self.client.complete(prompt, **kwargs)
+        if hasattr(response, 'content'):
+            return response.content
+        return str(response)

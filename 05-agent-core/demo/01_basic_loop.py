@@ -10,6 +10,13 @@ Demo 01: 最简 Agent 核心循环
   3. 循环的终止条件（最大步数）
   4. 如何获取循环执行的详细轨迹
 
+支持真实 LLM：
+  设置环境变量即可使用真实 LLM：
+    export LLM_PROVIDER=openai
+    export LLM_API_KEY=your-api-key
+    export LLM_MODEL=gpt-3.5-turbo
+    export REASONING_TYPE=simple
+
 运行方式：
   python demo/01_basic_loop.py
 """
@@ -18,16 +25,13 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from skill.agent_loop import AgentLoop
+from demo_helper import create_agent_loop, print_config_info
 
 
 def demo_basic_loop():
-    print("=" * 60)
-    print("Demo 01: 最简 Agent 核心循环")
-    print("=" * 60)
-    print()
+    print_config_info()
 
-    loop = AgentLoop(max_steps=3)
+    loop = create_agent_loop(max_steps=3)
 
     user_input = "帮我分析一下今天的天气情况"
 

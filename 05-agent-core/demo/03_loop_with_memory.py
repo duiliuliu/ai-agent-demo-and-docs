@@ -1,7 +1,7 @@
 """
 Demo 03: 带记忆读写的 Agent 循环
 
-场景：展示如何在 Agent 循环中集成记忆模块
+场景：展示如何在 Agent 循环中集成记忆模块（结合上下文管理）
 目标：理解记忆在多轮对话和长期交互中的作用
 
 核心知识点：
@@ -9,6 +9,13 @@ Demo 03: 带记忆读写的 Agent 循环
   2. 上下文与记忆的交互
   3. 短期记忆（上下文历史）和长期记忆的区别
   4. 记忆在循环中的使用流程
+
+支持真实 LLM：
+  设置环境变量即可使用真实 LLM + CoT 推理：
+    export LLM_PROVIDER=openai
+    export LLM_API_KEY=your-api-key
+    export LLM_MODEL=gpt-3.5-turbo
+    export REASONING_TYPE=cot
 
 运行方式：
   python demo/03_loop_with_memory.py
@@ -18,7 +25,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from skill.agent_loop import AgentLoop
+from demo_helper import create_agent_loop, print_config_info
 from skill.context_manager import EnhancedContextManager
 
 
@@ -59,10 +66,7 @@ class MockMemoryStore:
 
 
 def demo_loop_with_memory():
-    print("=" * 60)
-    print("Demo 03: 带记忆读写的 Agent 循环")
-    print("=" * 60)
-    print()
+    print_config_info()
 
     memory_store = MockMemoryStore()
 
@@ -71,9 +75,9 @@ def demo_loop_with_memory():
         max_history_length=5
     )
 
-    loop = AgentLoop(
+    loop = create_agent_loop(
         memory_store=memory_store,
-        max_steps=3
+        max_steps=4
     )
 
     user_input = "我想去北京旅游，帮我分析一下"
@@ -110,9 +114,12 @@ def demo_loop_with_memory():
     context_manager.save_to_memory()
 
     print("最终上下文摘要:")
-    summary = context_manager.get_context_summary()
-    for key, value in summary.items():
-        print(f"  {key}: {value}")
+    try:
+        summary = context_manager.get_context_summary()
+        for key, value in summary.items():
+            print(f"  {key}: {value}")
+    except Exception as e:
+        print(f"  (获取摘要时出现问题: {e})")
     print()
 
     print("=" * 60)
@@ -144,11 +151,12 @@ def demo_loop_with_memory():
    - 会话连续性：跨会话保持上下文
    - 个性化服务：根据用户历史提供定制化建议
 
-关键设计原则：
-  - 记忆应该是可检索的（支持关键词查询）
-  - 记忆应该是可更新的（支持增量更新）
-  - 记忆应该有过期机制（避免过时信息）
-  - 记忆应该有大小限制（避免内存溢出）
+使用真实 LLM 体验：
+  # 使用智谱AI + CoT 模式
+  export LLM_PROVIDER=zhipu
+  export LLM_API_KEY=your-api-key
+  export REASONING_TYPE=cot
+  python demo/03_loop_with_memory.py
 """)
 
 
