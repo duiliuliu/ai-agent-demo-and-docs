@@ -319,11 +319,14 @@ Final Answer: <基于真实Observation数据的答案>
             return self._tool_call_cache[cache_key]
         
         try:
-            result = self.tools[tool_name](tool_input)
+            result = self.tools[tool_name](**tool_input)
             result_str = str(result)
-            # 缓存结果
             self._tool_call_cache[cache_key] = result_str
             return result_str
+        except TypeError as e:
+            if "unhashable type" in str(e):
+                return f"[工具执行错误] 参数类型错误：{e}"
+            return f"[工具执行错误] 参数不匹配：{e}"
         except Exception as e:
             return f"[工具执行错误] {e}"
 
