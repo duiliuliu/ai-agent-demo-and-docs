@@ -22,6 +22,14 @@ Demo 02: 带工具调用的 Agent 循环（ReAct 推理引擎）
 """
 import sys
 import os
+import logging
+
+# 配置日志输出到控制台
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
