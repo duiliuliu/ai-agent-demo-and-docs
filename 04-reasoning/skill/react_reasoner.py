@@ -64,9 +64,10 @@ Final Answer: <基于真实Observation数据的答案>
 ## 关键规则
 
 1. **检查历史再行动**：输出前必须检查【当前对话历史】中的Observation，如果已有足够数据，直接输出Final Answer
-2. **禁止重复调用**：不要重复调用已经返回过结果的工具！
+2. **禁止重复调用**：不要重复调用已经成功返回结果的工具（相同参数）
 3. **禁止编造数据**：Final Answer必须基于真实的Observation，不能自己编造
 4. **任务分解**：将复杂问题分解为子任务，逐个完成
+5. **错误处理**：如果工具调用出错，分析错误原因，修正参数后重试，不要放弃
 
 ## 终止条件判断
 
@@ -76,6 +77,19 @@ Final Answer: <基于真实Observation数据的答案>
 - 问题："比较北京和上海的天气"
 - 观察：已有"北京25°C"和"上海28°C"
 - 结论：数据已充足，直接输出Final Answer
+
+## 错误处理指南
+
+如果 Observation 中包含错误信息（以 [工具错误] 或 [工具执行错误] 开头），请：
+1. 仔细阅读错误信息，理解出错原因
+2. 分析如何修正参数或选择其他工具
+3. 修正后重新调用，不要放弃
+4. 如果同一工具同一参数连续出错2次以上，尝试其他方案
+
+常见错误及处理：
+- 参数类型错误：检查工具参数应该是单个值，不是列表/字典
+- 参数缺失：补充必要的参数
+- 工具不存在：检查工具名是否正确
 
 ## 可用工具
 
@@ -104,8 +118,10 @@ Final Answer: <基于真实Observation数据的答案>
         self.tools = tools or {}
         self.tool_descriptions = tool_descriptions or {}
         self._recent_actions: List[str] = []
+        self._recent_action_inputs: List[str] = []
         self._loop_detection_window = 3
-        self._tool_call_cache: Dict[str, str] = {}  # 缓存工具调用结果，防止重复调用
+        self._tool_call_cache: Dict[str, str] = {}
+        self._error_count: Dict[str, int] = {}  # 记录各工具连续出错次数
 
     def register_tool(self, name: str, func: Callable, description: str = "") -> None:
         """注册工具"""
@@ -124,7 +140,9 @@ Final Answer: <基于真实Observation数据的答案>
             user_input=user_input
         )
         self._recent_actions = []
-        self._tool_call_cache = {}  # 清理工具调用缓存
+        self._recent_action_inputs = []
+        self._tool_call_cache = {}
+        self._error_count = {}
         self.reset_call_count()
 
         if not self.tools:
@@ -181,9 +199,12 @@ Final Answer: <基于真实Observation数据的答案>
                 step.action = action
                 step.action_input = action_input
 
-                # 死循环检测
-                if self._is_in_loop(action):
-                    step.observation = "[系统] 检测到循环，强制终止"
+                # 生成当前 action 的缓存 key，用于循环检测
+                action_input_str = json.dumps(action_input, sort_keys=True, ensure_ascii=False)
+
+                # 死循环检测：相同工具 + 相同参数 才判定为循环
+                if self._is_in_loop(action, action_input_str):
+                    step.observation = "[系统] 检测到相同工具相同参数的重复调用，已停止"
                     result.steps.append(step)
                     result.final_answer = "推理陷入循环，已终止"
                     result.success = False
@@ -195,6 +216,7 @@ Final Answer: <基于真实Observation数据的答案>
                 step.observation = observation
                 result.total_tool_calls += 1
                 self._recent_actions.append(action)
+                self._recent_action_inputs.append(action_input_str)
 
                 result.steps.append(step)
 
@@ -298,37 +320,59 @@ Final Answer: <基于真实Observation数据的答案>
 
         return result
 
-    def _is_in_loop(self, action: str) -> bool:
-        """检测是否在死循环"""
+    def _is_in_loop(self, action: str, action_input_str: str) -> bool:
+        """检测是否在死循环（相同工具 + 相同参数才算循环）"""
         if len(self._recent_actions) < self._loop_detection_window:
             return False
-        recent = self._recent_actions[-self._loop_detection_window:]
-        return all(a == action for a in recent)
+        
+        # 检查最近 N 次是否都是相同工具 + 相同参数
+        recent_pairs = list(zip(
+            self._recent_actions[-self._loop_detection_window:],
+            self._recent_action_inputs[-self._loop_detection_window:]
+        ))
+        current_pair = (action, action_input_str)
+        return all(pair == current_pair for pair in recent_pairs)
 
     def _execute_tool(self, tool_name: str, tool_input: Dict) -> str:
         """执行工具（带缓存，防止重复调用）"""
         if tool_name not in self.tools:
-            return f"[工具错误] 工具 '{tool_name}' 未注册。可用工具: {list(self.tools.keys())}"
+            available = ", ".join(self.tools.keys())
+            return f"[工具错误] 工具 '{tool_name}' 不存在。可用工具：{available}。请检查工具名是否正确。"
         
-        # 生成缓存key
         cache_key = f"{tool_name}:{json.dumps(tool_input, sort_keys=True, ensure_ascii=False)}"
         
-        # 检查缓存，如果已调用过相同工具和参数，返回缓存结果
         if cache_key in self._tool_call_cache:
-            logger.info(f"[ReActReasoner] 检测到重复工具调用 {tool_name}，返回缓存结果")
-            return self._tool_call_cache[cache_key]
+            cached = self._tool_call_cache[cache_key]
+            # 如果是错误结果，不缓存，允许重试
+            if not cached.startswith("[工具"):
+                logger.info(f"[ReActReasoner] 检测到重复工具调用 {tool_name}，返回缓存结果")
+                return cached
         
         try:
             result = self.tools[tool_name](**tool_input)
             result_str = str(result)
             self._tool_call_cache[cache_key] = result_str
+            self._error_count[tool_name] = 0  # 重置错误计数
             return result_str
         except TypeError as e:
-            if "unhashable type" in str(e):
-                return f"[工具执行错误] 参数类型错误：{e}"
-            return f"[工具执行错误] 参数不匹配：{e}"
+            error_msg = str(e)
+            self._error_count[tool_name] = self._error_count.get(tool_name, 0) + 1
+            error_count = self._error_count[tool_name]
+            
+            if "unhashable type: 'list'" in error_msg or "unhashable type: 'dict'" in error_msg:
+                suggestion = "参数类型错误：工具期望单个值（如字符串），但传入了列表/字典。请改为单个参数调用，多次调用工具获取多个结果。"
+            elif "missing" in error_msg.lower() or "required" in error_msg.lower():
+                suggestion = "参数缺失：请检查工具需要哪些参数，补充完整后重试。"
+            elif "unexpected keyword argument" in error_msg:
+                suggestion = "参数名错误：请检查工具参数名是否正确。"
+            else:
+                suggestion = "参数不匹配：请检查参数格式是否符合工具要求。"
+            
+            return f"[工具执行错误] {suggestion} 详细信息：{error_msg} (连续出错 {error_count} 次)"
         except Exception as e:
-            return f"[工具执行错误] {e}"
+            self._error_count[tool_name] = self._error_count.get(tool_name, 0) + 1
+            error_count = self._error_count[tool_name]
+            return f"[工具执行错误] 执行失败：{e} (连续出错 {error_count} 次)。请分析错误原因，修正后重试。"
 
     def _mock_llm(self, prompt: str, **kwargs) -> str:
         """ReAct 模拟LLM（用于无真实LLM时的测试）"""
