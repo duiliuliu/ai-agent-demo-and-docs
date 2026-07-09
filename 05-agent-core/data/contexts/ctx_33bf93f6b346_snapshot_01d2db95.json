@@ -1,0 +1,17 @@
+{
+  "snapshot_id": "snapshot_01d2db95",
+  "step_id": 0,
+  "timestamp": "2026-07-09T05:20:06.926926",
+  "context": {
+    "session_id": "ctx_33bf93f6b346",
+    "user_input": "我想去北京旅游，帮我分析一下",
+    "history": [],
+    "memory": {},
+    "config": {},
+    "metadata": {
+      "created_at": "2026-07-09T05:20:06.926883",
+      "version": 1
+    }
+  },
+  "metadata": {}
+}
