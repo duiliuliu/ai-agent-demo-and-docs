@@ -11,7 +11,8 @@ Demo 01: 轮流发言的极简多 Agent（平等协作模式）
   - 共识达成
 
 运行方式：
-  python demo/01_round_robin.py
+  LLM_PROVIDER=mock python demo/01_round_robin.py        # Mock 模式
+  LLM_PROVIDER=zhipu LLM_API_KEY=xxx python demo/01_round_robin.py  # 真实 LLM
 """
 import os
 import sys
@@ -21,7 +22,7 @@ demo_dir = os.path.dirname(os.path.abspath(__file__))
 skill_dir = os.path.dirname(demo_dir)
 sys.path.insert(0, os.path.join(skill_dir, "skill"))  # 添加 skill 目录
 
-from demo_helper import create_mock_agent, print_config_info, print_result
+from demo_helper import create_agent, print_config_info, print_result
 from agent_swarm import AgentSwarm, CollaborationPattern
 
 
@@ -37,26 +38,27 @@ def demo_round_robin():
     )
     
     # 注册多个 Agent（平等地位）
+    # 使用 create_agent 自动选择真实 LLM 或 Mock
     swarm.register(
         name="市场分析师",
-        agent_instance=create_mock_agent("市场分析师", "分析师", 
-            "[市场分析师] 从市场角度分析：'{prompt[:30]}'，建议关注用户需求和竞争格局"),
+        agent_instance=create_agent("市场分析师", "分析师",
+            system_prompt="你是一个市场分析师，请从市场角度分析问题，关注用户需求和竞争格局"),
         role="分析师",
         capabilities=["市场分析", "竞品研究"]
     )
     
     swarm.register(
         name="技术专家",
-        agent_instance=create_mock_agent("技术专家", "技术顾问",
-            "[技术专家] 从技术角度分析：'{prompt[:30]}'，建议考虑系统架构和技术可行性"),
+        agent_instance=create_agent("技术专家", "技术顾问",
+            system_prompt="你是一个技术专家，请从技术角度分析问题，关注系统架构和技术可行性"),
         role="技术顾问",
         capabilities=["技术评估", "架构设计"]
     )
     
     swarm.register(
         name="产品经理",
-        agent_instance=create_mock_agent("产品经理", "产品规划",
-            "[产品经理] 从产品角度分析：'{prompt[:30]}'，建议平衡用户体验和业务目标"),
+        agent_instance=create_agent("产品经理", "产品规划",
+            system_prompt="你是一个产品经理，请从产品角度分析问题，平衡用户体验和业务目标"),
         role="产品规划",
         capabilities=["产品设计", "需求分析"]
     )

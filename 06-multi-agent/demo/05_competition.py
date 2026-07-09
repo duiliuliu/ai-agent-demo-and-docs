@@ -11,14 +11,18 @@ Demo 05: 竞争模式（Competition Collaboration）
   - 模型对比：不同模型结果对比
 
 运行方式：
-  python demo/05_competition.py
+  LLM_PROVIDER=mock python demo/05_competition.py        # Mock 模式
+  LLM_PROVIDER=zhipu LLM_API_KEY=xxx python demo/05_competition.py  # 真实 LLM
 """
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+demo_dir = os.path.dirname(os.path.abspath(__file__))
+skill_dir = os.path.dirname(demo_dir)
+sys.path.insert(0, os.path.join(skill_dir, "skill"))
+sys.path.insert(0, demo_dir)
 
-from demo.demo_helper import create_mock_agent, print_config_info, print_result
+from demo_helper import create_agent, print_config_info, print_result
 from agent_swarm import AgentSwarm, CollaborationPattern
 
 
@@ -36,8 +40,8 @@ def demo_competition():
     # 注册多个竞争 Agent（优先级不同）
     swarm.register(
         name="方案设计师_A",
-        agent_instance=create_mock_agent("方案设计师_A", "方案设计",
-            "[方案A] 设计方案：采用微服务架构，优点是灵活可扩展，缺点是运维复杂度高"),
+        agent_instance=create_agent("方案设计师_A", "方案设计",
+            system_prompt="你是方案设计师A，擅长微服务架构设计。请提出你的技术方案，包含优缺点分析。"),
         role="方案设计",
         capabilities=["架构设计", "方案规划"],
         priority=2  # 优先级（用于选优）
@@ -45,8 +49,8 @@ def demo_competition():
     
     swarm.register(
         name="方案设计师_B",
-        agent_instance=create_mock_agent("方案设计师_B", "方案设计",
-            "[方案B] 设计方案：采用单体架构+模块化，优点是开发快运维简单，缺点是扩展性受限"),
+        agent_instance=create_agent("方案设计师_B", "方案设计",
+            system_prompt="你是方案设计师B，擅长单体架构+模块化设计。请提出你的技术方案，包含优缺点分析。"),
         role="方案设计",
         capabilities=["架构设计", "方案规划"],
         priority=1  # 最高优先级
@@ -54,8 +58,8 @@ def demo_competition():
     
     swarm.register(
         name="方案设计师_C",
-        agent_instance=create_mock_agent("方案设计师_C", "方案设计",
-            "[方案C] 设计方案：采用Serverless架构，优点是按需付费免运维，缺点是冷启动延迟"),
+        agent_instance=create_agent("方案设计师_C", "方案设计",
+            system_prompt="你是方案设计师C，擅长Serverless架构设计。请提出你的技术方案，包含优缺点分析。"),
         role="方案设计",
         capabilities=["架构设计", "方案规划"],
         priority=3

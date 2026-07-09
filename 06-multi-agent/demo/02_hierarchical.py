@@ -11,14 +11,18 @@ Demo 02: 主子模式（层级调度协作）
   - 项目分解执行
 
 运行方式：
-  python demo/02_hierarchical.py
+  LLM_PROVIDER=mock python demo/02_hierarchical.py        # Mock 模式
+  LLM_PROVIDER=zhipu LLM_API_KEY=xxx python demo/02_hierarchical.py  # 真实 LLM
 """
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+demo_dir = os.path.dirname(os.path.abspath(__file__))
+skill_dir = os.path.dirname(demo_dir)
+sys.path.insert(0, os.path.join(skill_dir, "skill"))
+sys.path.insert(0, demo_dir)
 
-from demo.demo_helper import create_mock_agent, print_config_info, print_result
+from demo_helper import create_agent, print_config_info, print_result
 from agent_swarm import AgentSwarm, CollaborationPattern
 
 
@@ -36,8 +40,8 @@ def demo_hierarchical():
     # 注册主 Agent（调度员）
     swarm.register(
         name="主编调度员",
-        agent_instance=create_mock_agent("主编调度员", "调度员",
-            "作为主编，我将任务分解为：1.数据收集 -> 数据员 2.分析 -> 分析师 3.撰写 -> 撰写员"),
+        agent_instance=create_agent("主编调度员", "调度员",
+            system_prompt="你是主编调度员，负责分解任务、分配给子Agent执行、汇总结果。请简洁地列出任务分解方案。"),
         role="调度员",
         capabilities=["任务分解", "结果汇总", "质量把控"],
         is_coordinator=True  # 标记为主调度员
@@ -46,32 +50,32 @@ def demo_hierarchical():
     # 注册子 Agent（执行者）
     swarm.register(
         name="数据员",
-        agent_instance=create_mock_agent("数据员", "数据收集",
-            "[数据员] 收集数据完成：市场报告、竞品分析、用户调研数据"),
+        agent_instance=create_agent("数据员", "数据收集",
+            system_prompt="你是数据收集员，负责收集相关数据和信息。请简要列出你收集到的关键数据。"),
         role="数据收集",
         capabilities=["数据抓取", "信息检索"]
     )
     
     swarm.register(
         name="分析师",
-        agent_instance=create_mock_agent("分析师", "数据分析",
-            "[分析师] 基于数据员提供的数据，分析结论：市场增长率15%，竞品优势明显"),
+        agent_instance=create_agent("分析师", "数据分析",
+            system_prompt="你是数据分析师，负责对数据进行分析。请给出分析结论和关键发现。"),
         role="数据分析",
         capabilities=["数据处理", "统计分析"]
     )
     
     swarm.register(
         name="撰写员",
-        agent_instance=create_mock_agent("撰写员", "文档撰写",
-            "[撰写员] 整合分析结果，撰写报告：第一章市场概况，第二章竞品对比..."),
+        agent_instance=create_agent("撰写员", "文档撰写",
+            system_prompt="你是文档撰写员，负责整合分析结果撰写报告。请给出报告的主要章节和内容摘要。"),
         role="文档撰写",
         capabilities=["文案写作", "报告生成"]
     )
     
     swarm.register(
         name="审查员",
-        agent_instance=create_mock_agent("审查员", "内容审查",
-            "[审查员] 审查结果：数据准确，分析合理，文案符合规范，建议发布"),
+        agent_instance=create_agent("审查员", "内容审查",
+            system_prompt="你是内容审查员，负责检查报告质量。请给出审查意见和改进建议。"),
         role="内容审查",
         capabilities=["质量检查", "合规审查"]
     )

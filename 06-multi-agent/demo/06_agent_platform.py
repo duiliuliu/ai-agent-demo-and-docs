@@ -11,17 +11,19 @@ Demo 06: Agent 平台模式（Agent Platform）
   - 灵活协作：Agent 自行匹配任务
 
 运行方式：
-  python demo/06_agent_platform.py
+  LLM_PROVIDER=mock python demo/06_agent_platform.py        # Mock 模式
+  LLM_PROVIDER=zhipu LLM_API_KEY=xxx python demo/06_agent_platform.py  # 真实 LLM
 """
 import os
 import sys
 import logging
 
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+demo_dir = os.path.dirname(os.path.abspath(__file__))
+skill_dir = os.path.dirname(demo_dir)
+sys.path.insert(0, os.path.join(skill_dir, "skill"))
+sys.path.insert(0, demo_dir)
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from demo.demo_helper import create_mock_agent, print_config_info, print_result
+from demo_helper import create_agent, print_config_info, print_result
 from agent_swarm import AgentSwarm, CollaborationPattern
 from communication_bus import PubSubBus
 
@@ -106,32 +108,32 @@ def demo_agent_platform():
     # 创建 Agent 平台
     platform = AgentPlatform(name="open_platform")
     
-    # 动态注册多个 Agent（模拟开放环境）
+    # 动态注册多个 Agent（使用 create_agent 支持真实 LLM）
     platform.register_agent(
         name="weather_agent",
-        agent_instance=create_mock_agent("weather_agent", "天气服务",
-            "[weather_agent] 天气查询结果：北京晴天25°C，上海多云28°C"),
+        agent_instance=create_agent("weather_agent", "天气服务",
+            system_prompt="你是天气查询服务，请根据用户需求提供天气信息。"),
         capabilities=["天气查询", "气象预报"]
     )
     
     platform.register_agent(
         name="flight_agent",
-        agent_instance=create_mock_agent("flight_agent", "航班服务",
-            "[flight_agent] 航班查询结果：CA123 北京-上海 08:00-10:30"),
+        agent_instance=create_agent("flight_agent", "航班服务",
+            system_prompt="你是航班查询服务，请根据用户需求提供航班信息。"),
         capabilities=["航班查询", "机票预订"]
     )
     
     platform.register_agent(
         name="hotel_agent",
-        agent_instance=create_mock_agent("hotel_agent", "酒店服务",
-            "[hotel_agent] 酒店查询结果：上海浦东香格里拉 ¥680/晚"),
+        agent_instance=create_agent("hotel_agent", "酒店服务",
+            system_prompt="你是酒店查询服务，请根据用户需求提供酒店信息。"),
         capabilities=["酒店查询", "房间预订"]
     )
     
     platform.register_agent(
         name="calc_agent",
-        agent_instance=create_mock_agent("calc_agent", "计算服务",
-            "[calc_agent] 计算结果：总价 = 680 + 580 = 1260元"),
+        agent_instance=create_agent("calc_agent", "计算服务",
+            system_prompt="你是计算服务，请根据用户需求进行数学计算。"),
         capabilities=["数学计算", "费用估算"]
     )
     

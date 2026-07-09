@@ -11,14 +11,18 @@ Demo 03: 辩论模式（正反方辩论后总结）
   - 复杂问题的多角度论证
 
 运行方式：
-  python demo/03_debate.py
+  LLM_PROVIDER=mock python demo/03_debate.py        # Mock 模式
+  LLM_PROVIDER=zhipu LLM_API_KEY=xxx python demo/03_debate.py  # 真实 LLM
 """
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+demo_dir = os.path.dirname(os.path.abspath(__file__))
+skill_dir = os.path.dirname(demo_dir)
+sys.path.insert(0, os.path.join(skill_dir, "skill"))
+sys.path.insert(0, demo_dir)
 
-from demo.demo_helper import create_mock_agent, print_config_info, print_result
+from demo_helper import create_agent, print_config_info, print_result
 from agent_swarm import AgentSwarm, CollaborationPattern
 
 
@@ -36,8 +40,8 @@ def demo_debate():
     # 注册正方 Agent
     swarm.register(
         name="正方代表",
-        agent_instance=create_mock_agent("正方代表", "正方",
-            "[正方] 我支持这个方案，理由如下：1.效率提升 2.成本降低 3.用户体验改善"),
+        agent_instance=create_agent("正方代表", "正方",
+            system_prompt="你是辩论正方代表，请支持给定方案，列举优势。每轮发言控制在100字以内。"),
         role="正方",
         capabilities=["方案支持", "优势分析"]
     )
@@ -45,8 +49,8 @@ def demo_debate():
     # 注册反方 Agent
     swarm.register(
         name="反方代表",
-        agent_instance=create_mock_agent("反方代表", "反方",
-            "[反方] 我反对这个方案，反驳如下：1.风险较高 2.实施难度大 3.短期成本增加"),
+        agent_instance=create_agent("反方代表", "反方",
+            system_prompt="你是辩论反方代表，请反对给定方案，指出风险和问题。每轮发言控制在100字以内。"),
         role="反方",
         capabilities=["方案反对", "风险分析"]
     )
@@ -54,10 +58,10 @@ def demo_debate():
     # 注册仲裁者 Agent
     swarm.register(
         name="仲裁者",
-        agent_instance=create_mock_agent("仲裁者", "仲裁",
-            "[仲裁者] 综合正反方观点，最终结论：方案可行但需注意风险控制，建议分阶段实施"),
+        agent_instance=create_agent("仲裁者", "仲裁",
+            system_prompt="你是辩论仲裁者，请综合正反双方观点，给出客观的结论和建议。"),
         role="仲裁者",
-        capabilities ["观点总结", "方案裁决"]
+        capabilities=["观点总结", "方案裁决"]
     )
     
     # 定义辩论主题

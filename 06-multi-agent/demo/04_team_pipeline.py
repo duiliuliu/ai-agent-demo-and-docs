@@ -11,14 +11,18 @@ Demo 04: 团队流水线模式（Pipeline Collaboration）
   - 审批流程（提交→初审→复审→终审）
 
 运行方式：
-  python demo/04_team_pipeline.py
+  LLM_PROVIDER=mock python demo/04_team_pipeline.py        # Mock 模式
+  LLM_PROVIDER=zhipu LLM_API_KEY=xxx python demo/04_team_pipeline.py  # 真实 LLM
 """
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+demo_dir = os.path.dirname(os.path.abspath(__file__))
+skill_dir = os.path.dirname(demo_dir)
+sys.path.insert(0, os.path.join(skill_dir, "skill"))
+sys.path.insert(0, demo_dir)
 
-from demo.demo_helper import create_mock_agent, print_config_info, print_result
+from demo_helper import create_agent, print_config_info, print_result
 from agent_swarm import AgentSwarm, CollaborationPattern
 
 
@@ -38,8 +42,8 @@ def demo_team_pipeline():
     # Stage 1: 研究员
     swarm.register(
         name="研究员",
-        agent_instance=create_mock_agent("研究员", "研究员",
-            "[研究员] 研究结果：收集了行业报告、竞品数据、用户反馈，关键发现是..."),
+        agent_instance=create_agent("研究员", "研究",
+            system_prompt="你是研究员，负责收集和整理信息。请简要列出你收集到的关键数据和发现。"),
         role="研究",
         capabilities=["信息收集", "行业研究"]
     )
@@ -47,8 +51,8 @@ def demo_team_pipeline():
     # Stage 2: 数据分析师
     swarm.register(
         name="数据分析师",
-        agent_instance=create_mock_agent("数据分析师", "数据分析",
-            "[数据分析师] 分析结果：基于研究员提供的数据，市场趋势是增长15%，竞品优势明显..."),
+        agent_instance=create_agent("数据分析师", "数据分析",
+            system_prompt="你是数据分析师，负责分析数据并提取洞察。请给出关键趋势和结论。"),
         role="数据分析",
         capabilities=["数据处理", "统计分析"]
     )
@@ -56,8 +60,8 @@ def demo_team_pipeline():
     # Stage 3: 内容撰写员
     swarm.register(
         name="撰写员",
-        agent_instance=create_mock_agent("撰写员", "撰写",
-            "[撰写员] 撰写内容：基于分析结果，我撰写了以下报告草稿：第一部分行业概况..."),
+        agent_instance=create_agent("撰写员", "撰写",
+            system_prompt="你是内容撰写员，负责基于分析结果撰写报告。请给出报告的主要章节和内容摘要。"),
         role="撰写",
         capabilities=["文案写作", "报告撰写"]
     )
@@ -65,8 +69,8 @@ def demo_team_pipeline():
     # Stage 4: 编辑审核员
     swarm.register(
         name="编辑",
-        agent_instance=create_mock_agent("编辑", "编辑",
-            "[编辑] 编辑审核：检查内容结构合理、数据准确、语言流畅，已优化部分表述..."),
+        agent_instance=create_agent("编辑", "编辑",
+            system_prompt="你是编辑审核员，负责检查和优化内容。请给出审核意见和优化建议。"),
         role="编辑",
         capabilities=["内容审核", "语言优化"]
     )
@@ -74,8 +78,8 @@ def demo_team_pipeline():
     # Stage 5: 质量检查员
     swarm.register(
         name="质检员",
-        agent_instance=create_mock_agent("质检员", "质检",
-            "[质检员] 质检通过：内容符合规范，无错误，建议发布"),
+        agent_instance=create_agent("质检员", "质检",
+            system_prompt="你是质量检查员，负责最终质量把关。请给出质检结论。"),
         role="质检",
         capabilities=["质量检查", "合规审核"]
     )
