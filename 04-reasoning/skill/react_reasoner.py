@@ -48,20 +48,34 @@ class ReActReasoner(BaseReasoner):
 
     REACT_PROMPT_TEMPLATE = """你是一个专业的AI助手，需要通过工具获取信息并回答问题。
 
-## 严格输出格式（每次只输出一步！）
+## 严格输出格式
 
-Thought: <你对当前情况的分析，说明下一步要做什么>
-Action: <工具名称，必须是以下工具之一>
-Action Input: <JSON格式的参数，如 {"city": "北京"}>
+每次只输出以下两种格式之一：
 
-## 重要规则（必须遵守）
+### 格式A - 需要调用工具时：
+Thought: <分析当前对话历史，说明下一步需要什么信息>
+Action: <工具名称>
+Action Input: <JSON参数>
 
-1. **单步输出**：每次只输出一个 Thought + Action + Action Input，然后停止，等待系统返回 Observation
-2. **禁止编造**：绝对不要自己填写 Observation 的内容！不要编造数据！所有数据必须来自工具返回
-3. **等待结果**：输出 Action 后必须等待工具执行结果，系统会将 Observation 注入到对话中
-4. **最终答案**：当工具返回的信息足够回答问题时，输出：
-   Thought: 我已经获得了足够的信息来回答问题
-   Final Answer: <基于工具返回数据的真实答案>
+### 格式B - 信息已充足时（直接输出最终答案）：
+Thought: <分析对话历史中的Observation，确认已获得所有必要信息>
+Final Answer: <基于真实Observation数据的答案>
+
+## 关键规则
+
+1. **检查历史再行动**：输出前必须检查【当前对话历史】中的Observation，如果已有足够数据，直接输出Final Answer
+2. **禁止重复调用**：不要重复调用已经返回过结果的工具！
+3. **禁止编造数据**：Final Answer必须基于真实的Observation，不能自己编造
+4. **任务分解**：将复杂问题分解为子任务，逐个完成
+
+## 终止条件判断
+
+当【当前对话历史】中的Observation已包含回答问题所需的**所有关键数据**时，立即输出Final Answer，不要再调用工具。
+
+示例判断：
+- 问题："比较北京和上海的天气"
+- 观察：已有"北京25°C"和"上海28°C"
+- 结论：数据已充足，直接输出Final Answer
 
 ## 可用工具
 
@@ -77,7 +91,7 @@ Action Input: <JSON格式的参数，如 {"city": "北京"}>
 
 ---
 
-现在输出你的第一步思考（只输出 Thought + Action + Action Input，不要输出 Observation）："""
+请分析对话历史中的Observation，判断是否已有足够数据回答问题。如果充足，输出Final Answer；否则输出下一步的Action。"""
 
     def __init__(
         self,
@@ -91,6 +105,7 @@ Action Input: <JSON格式的参数，如 {"city": "北京"}>
         self.tool_descriptions = tool_descriptions or {}
         self._recent_actions: List[str] = []
         self._loop_detection_window = 3
+        self._tool_call_cache: Dict[str, str] = {}  # 缓存工具调用结果，防止重复调用
 
     def register_tool(self, name: str, func: Callable, description: str = "") -> None:
         """注册工具"""
@@ -109,6 +124,7 @@ Action Input: <JSON格式的参数，如 {"city": "北京"}>
             user_input=user_input
         )
         self._recent_actions = []
+        self._tool_call_cache = {}  # 清理工具调用缓存
         self.reset_call_count()
 
         if not self.tools:
@@ -290,12 +306,24 @@ Action Input: <JSON格式的参数，如 {"city": "北京"}>
         return all(a == action for a in recent)
 
     def _execute_tool(self, tool_name: str, tool_input: Dict) -> str:
-        """执行工具"""
+        """执行工具（带缓存，防止重复调用）"""
         if tool_name not in self.tools:
             return f"[工具错误] 工具 '{tool_name}' 未注册。可用工具: {list(self.tools.keys())}"
+        
+        # 生成缓存key
+        cache_key = f"{tool_name}:{json.dumps(tool_input, sort_keys=True, ensure_ascii=False)}"
+        
+        # 检查缓存，如果已调用过相同工具和参数，返回缓存结果
+        if cache_key in self._tool_call_cache:
+            logger.info(f"[ReActReasoner] 检测到重复工具调用 {tool_name}，返回缓存结果")
+            return self._tool_call_cache[cache_key]
+        
         try:
             result = self.tools[tool_name](tool_input)
-            return str(result)
+            result_str = str(result)
+            # 缓存结果
+            self._tool_call_cache[cache_key] = result_str
+            return result_str
         except Exception as e:
             return f"[工具执行错误] {e}"
 
