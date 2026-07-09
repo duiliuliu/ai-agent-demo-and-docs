@@ -24,62 +24,60 @@ ReAct (Reasoning + Acting) 推理器
   2. 最大步数限制：超过 max_steps 强制结束
   3. 工具调用失败处理：单步失败不应让整个推理崩溃
   4. 工具选择正确性：依赖LLM对工具的理解
+  5. LLM编造数据：必须严格限制LLM只输出单步，等待工具返回
 
 实现要点：
-  - 使用 ReAct 格式 Prompt（Few-shot 示例）
-  - LLM 输出格式：Thought: / Action: / Action Input: / Observation:
-  - 解析 LLM 输出，提取下一步行动
-  - 调用工具（或模拟工具）得到 Observation
+  - 使用 ReAct 格式 Prompt，明确要求单步输出
+  - LLM 输出格式：只有 Thought + Action + Action Input
+  - 解析时只取第一步，忽略LLM自编造的后续内容
+  - 调用工具得到真实的 Observation
   - 循环直到输出 Final Answer 或达到最大步数
 """
 import re
 import time
+import json
+import logging
 from typing import Dict, Any, List, Optional, Callable
 from .base_reasoner import BaseReasoner, ReasoningType, Step, ReasoningResult
+
+logger = logging.getLogger(__name__)
 
 
 class ReActReasoner(BaseReasoner):
     """Reasoning + Acting 推理器"""
 
-    REACT_PROMPT_TEMPLATE = """你是一个可以使用工具的AI助手。按照以下格式思考和行动：
+    REACT_PROMPT_TEMPLATE = """你是一个专业的AI助手，需要通过工具获取信息并回答问题。
 
-Thought: 你对当前情况的思考
-Action: 你要执行的动作（必须是以下工具之一：{tool_names}）
-Action Input: 动作参数（JSON格式）
+## 严格输出格式（每次只输出一步！）
 
-重要规则：
-1. 每次只输出一个 Thought + Action + Action Input，然后等待系统执行工具并返回 Observation
-2. 绝对不要自己编造 Observation 的内容，Observation 由系统工具返回
-3. 等待真实的 Observation 后再进行下一步思考
-4. 当你认为已经得到足够信息时，输出：
-   Thought: 我已经得到了最终答案
-   Final Answer: 最终答案
+Thought: <你对当前情况的分析，说明下一步要做什么>
+Action: <工具名称，必须是以下工具之一>
+Action Input: <JSON格式的参数，如 {"city": "北京"}>
 
-可用工具：
+## 重要规则（必须遵守）
+
+1. **单步输出**：每次只输出一个 Thought + Action + Action Input，然后停止，等待系统返回 Observation
+2. **禁止编造**：绝对不要自己填写 Observation 的内容！不要编造数据！所有数据必须来自工具返回
+3. **等待结果**：输出 Action 后必须等待工具执行结果，系统会将 Observation 注入到对话中
+4. **最终答案**：当工具返回的信息足够回答问题时，输出：
+   Thought: 我已经获得了足够的信息来回答问题
+   Final Answer: <基于工具返回数据的真实答案>
+
+## 可用工具
+
 {tool_descriptions}
 
-{context}
+## 当前对话历史
 
-问题：{question}
+{history}
 
-现在开始你的第一步思考："""
+## 用户问题
 
-    REACT_FEWSHOT = """示例：
-问题：北京和上海今天哪个城市更暖和？
-Thought: 我需要查询北京和上海的天气，然后比较温度。
-Action: get_weather
-Action Input: {"city": "北京"}
-Observation: 北京今天28度，晴
-Thought: 现在查询上海的天气
-Action: get_weather
-Action Input: {"city": "上海"}
-Observation: 上海今天32度，晴
-Thought: 北京28度，上海32度，上海更暖和。
-Final Answer: 上海今天更暖和（32度 vs 28度）
+{question}
 
 ---
 
-"""
+现在输出你的第一步思考（只输出 Thought + Action + Action Input，不要输出 Observation）："""
 
     def __init__(
         self,
@@ -89,11 +87,8 @@ Final Answer: 上海今天更暖和（32度 vs 28度）
         max_steps: int = 8
     ):
         super().__init__(llm_client, max_steps)
-        # 工具注册表：tool_name -> callable(input_dict) -> str
         self.tools = tools or {}
-        # 工具描述：tool_name -> description
         self.tool_descriptions = tool_descriptions or {}
-        # 死循环检测：最近 N 步的 action 列表
         self._recent_actions: List[str] = []
         self._loop_detection_window = 3
 
@@ -123,92 +118,115 @@ Final Answer: 上海今天更暖和（32度 vs 28度）
             return result
 
         try:
-            # 构建初始 Prompt
-            prompt = self._build_initial_prompt(user_input, context or {})
+            # 对话历史，用于多轮推理
+            history_lines = []
 
             for step_id in range(1, self.max_steps + 1):
-                # 调用 LLM 思考下一步
+                # 构建 Prompt
+                prompt = self._build_prompt(user_input, history_lines)
+
+                logger.info(f"[ReActReasoner] 第 {step_id} 步，调用 LLM...")
+
+                # 调用 LLM
                 llm_response = self.call_llm(prompt)
                 result.total_llm_calls = self.get_call_count()
 
-                # 解析 LLM 输出
+                logger.info(f"[ReActReasoner] 第 {step_id} 步 LLM 响应:\n{llm_response}")
+
+                # 解析 LLM 输出（只取第一步）
                 parsed = self._parse_response(llm_response)
 
                 step = Step(
                     step_id=step_id,
-                    thought=parsed["thought"]
+                    thought=parsed.get("thought", "")
                 )
 
-                # 是否已得到最终答案
-                if parsed["final_answer"]:
+                # 检查是否得到最终答案
+                if parsed.get("final_answer"):
                     step.final_answer = parsed["final_answer"]
                     result.steps.append(step)
                     result.final_answer = parsed["final_answer"]
                     result.success = True
+                    logger.info(f"[ReActReasoner] 第 {step_id} 步得到最终答案: {parsed['final_answer']}")
                     break
 
-                # 否则需要执行 Action
-                if parsed["action"]:
-                    step.action = parsed["action"]
-                    step.action_input = parsed["action_input"]
+                # 检查是否有 Action
+                action = parsed.get("action")
+                action_input = parsed.get("action_input", {})
 
-                    # 死循环检测
-                    if self._is_in_loop(parsed["action"]):
-                        step.observation = "[系统提示] 检测到循环，强制终止以避免无限循环"
-                        result.steps.append(step)
-                        result.final_answer = f"推理陷入循环，已在第{step_id}步终止"
-                        result.success = False
-                        result.error = "loop_detected"
-                        break
+                if not action:
+                    # 没有 Action 也没有 Final Answer，可能是解析失败
+                    step.observation = "[系统] 无法解析 LLM 输出，请重新思考"
+                    result.steps.append(step)
+                    history_lines.append(f"Thought: {parsed.get('thought', '无法解析')}")
+                    history_lines.append("Observation: [系统] 无法解析输出，请重新思考")
+                    continue
 
-                    # 执行工具
-                    observation = self._execute_tool(
-                        parsed["action"],
-                        parsed["action_input"] or {}
-                    )
-                    step.observation = observation
-                    result.total_tool_calls += 1
-                    self._recent_actions.append(parsed["action"])
+                step.action = action
+                step.action_input = action_input
+
+                # 死循环检测
+                if self._is_in_loop(action):
+                    step.observation = "[系统] 检测到循环，强制终止"
+                    result.steps.append(step)
+                    result.final_answer = "推理陷入循环，已终止"
+                    result.success = False
+                    result.error = "loop_detected"
+                    break
+
+                # 执行工具
+                observation = self._execute_tool(action, action_input)
+                step.observation = observation
+                result.total_tool_calls += 1
+                self._recent_actions.append(action)
 
                 result.steps.append(step)
 
-                # 更新 Prompt，追加这一轮的交互
-                prompt += f"\nThought: {parsed['thought']}\n"
-                if parsed["action"]:
-                    prompt += f"Action: {parsed['action']}\n"
-                    prompt += f"Action Input: {parsed['action_input']}\n"
-                    prompt += f"Observation: {step.observation}\n"
+                # 更新对话历史
+                history_lines.append(f"Thought: {parsed.get('thought', '')}")
+                history_lines.append(f"Action: {action}")
+                history_lines.append(f"Action Input: {json.dumps(action_input, ensure_ascii=False)}")
+                history_lines.append(f"Observation: {observation}")
+                history_lines.append("")
+
+                logger.info(f"[ReActReasoner] 第 {step_id} 步执行工具 {action}，结果: {observation}")
 
             else:
-                # 循环正常结束（达到 max_steps）
+                # 达到最大步数
                 result.final_answer = result.steps[-1].thought if result.steps else "未得出结论"
                 result.error = f"达到最大步数 {self.max_steps}"
                 result.success = False
 
         except Exception as e:
+            logger.error(f"[ReActReasoner] 执行异常: {e}")
             result.success = False
             result.error = str(e)
 
         result.execution_time_ms = (time.time() - start_time) * 1000
         return result
 
-    def _build_initial_prompt(self, question: str, context: Dict) -> str:
+    def _build_prompt(self, question: str, history: List[str]) -> str:
+        """构建 Prompt"""
         tool_names = ", ".join(self.tools.keys())
-        tool_desc_lines = []
-        for name, desc in self.tool_descriptions.items():
-            tool_desc_lines.append(f"- {name}: {desc}")
-        tool_descriptions = "\n".join(tool_desc_lines) if tool_desc_lines else "（无工具描述）"
+        tool_desc_lines = [f"- {name}: {desc}" for name, desc in self.tool_descriptions.items()]
+        if not tool_desc_lines:
+            tool_desc_lines = [f"- {name}: 工具 {name}" for name in self.tools.keys()]
+        tool_descriptions = "\n".join(tool_desc_lines)
 
-        context_text = context.get("context", "")
+        history_text = "\n".join(history) if history else "（无历史对话，这是第一步）"
+
         return self.REACT_PROMPT_TEMPLATE.format(
-            tool_names=tool_names,
             tool_descriptions=tool_descriptions,
-            context=context_text,
+            history=history_text,
             question=question
         )
 
     def _parse_response(self, response: str) -> Dict[str, Any]:
-        """解析 LLM 响应，只提取第一个 Thought/Action/Action Input 或 Final Answer"""
+        """
+        解析 LLM 响应，只提取第一个 Thought/Action/Action Input
+        
+        关键：忽略 LLM 可能自编造的后续内容
+        """
         result = {
             "thought": "",
             "action": None,
@@ -217,53 +235,55 @@ Final Answer: 上海今天更暖和（32度 vs 28度）
         }
 
         lines = response.strip().split('\n')
-        first_thought = None
-        first_action = None
-        first_action_input = None
-        first_final_answer = None
+        found_thought = False
+        found_action = False
+        found_action_input = False
 
-        for i, line in enumerate(lines):
+        for line in lines:
             line_stripped = line.strip()
+            lower_line = line_stripped.lower()
 
-            # 只提取第一个 Thought
-            if line_stripped.lower().startswith('thought:') and first_thought is None:
-                first_thought = line_stripped.split(':', 1)[1].strip()
+            # 提取第一个 Thought
+            if lower_line.startswith('thought:') and not found_thought:
+                result["thought"] = line_stripped.split(':', 1)[1].strip()
+                found_thought = True
 
-            # 只提取第一个 Action
-            elif line_stripped.lower().startswith('action:') and first_action is None:
-                first_action = line_stripped.split(':', 1)[1].strip()
+            # 提取第一个 Action
+            elif lower_line.startswith('action:') and not found_action:
+                action_name = line_stripped.split(':', 1)[1].strip()
+                # 只取工具名（去掉可能的额外文字）
+                action_name = action_name.split()[0] if action_name else action_name
+                result["action"] = action_name
+                found_action = True
 
-            # 只提取第一个 Action Input
-            elif line_stripped.lower().startswith('action input:') and first_action_input is None:
+            # 提取第一个 Action Input
+            elif lower_line.startswith('action input:') and not found_action_input:
                 input_str = line_stripped.split(':', 1)[1].strip()
                 try:
-                    import json
-                    first_action_input = json.loads(input_str)
-                except Exception:
-                    first_action_input = {"raw": input_str}
+                    # 尝试解析 JSON
+                    result["action_input"] = json.loads(input_str)
+                except json.JSONDecodeError:
+                    # 尝试修复常见的 JSON 格式问题
+                    input_str = input_str.replace("'", '"')
+                    try:
+                        result["action_input"] = json.loads(input_str)
+                    except:
+                        result["action_input"] = {"raw": input_str}
+                found_action_input = True
 
-            # 提取 Final Answer（这个可以覆盖，因为只应该出现一次）
-            elif line_stripped.lower().startswith('final answer:'):
-                first_final_answer = line_stripped.split(':', 1)[1].strip()
+            # 提取 Final Answer（只有当没有 Action 时才算有效）
+            elif lower_line.startswith('final answer:'):
+                final_answer_text = line_stripped.split(':', 1)[1].strip()
+                result["final_answer"] = final_answer_text
 
-        # 优先级：如果有 Final Answer 且没有待执行的 Action，则返回最终答案
-        if first_final_answer and not first_action:
-            result["final_answer"] = first_final_answer
-            if first_thought:
-                result["thought"] = first_thought
-            return result
+        # 如果有 Action，清空 Final Answer（强制要求先执行工具）
+        if result["action"]:
+            result["final_answer"] = None
 
-        # 否则返回第一个 Thought/Action/Action Input
-        result["thought"] = first_thought or ""
-        result["action"] = first_action
-        result["action_input"] = first_action_input
-
-        # 如果有 Final Answer 但也有 Action，说明 LLM 编造了结果，忽略 Final Answer
-        # 强制要求先执行 Action
         return result
 
     def _is_in_loop(self, action: str) -> bool:
-        """检测是否在死循环（连续相同action）"""
+        """检测是否在死循环"""
         if len(self._recent_actions) < self._loop_detection_window:
             return False
         recent = self._recent_actions[-self._loop_detection_window:]
@@ -280,144 +300,8 @@ Final Answer: 上海今天更暖和（32度 vs 28度）
             return f"[工具执行错误] {e}"
 
     def _mock_llm(self, prompt: str, **kwargs) -> str:
-        """ReAct 模拟LLM：智能选择工具"""
-        # 提取问题
-        question_match = re.search(r"问题[：:]\s*(.+?)(?:\n|$)", prompt)
-        if not question_match:
-            return "Thought: 我无法理解问题。\nFinal Answer: 未知"
-        question = question_match.group(1).strip()
-
-        # 检查是否已经实际有 Observation 出现（不是模板说明）
-        # 模板说明是"Observation: 动作执行结果（系统会填入）"
-        # 真实 Observation 后面跟的是工具返回的结果
-        # 用中文逗号后的内容判断：如果 Observation 后是中文或英文具体值而非"动作执行结果"，则为真实observation
-        template_pattern = r"Observation\s*[:：]\s*动作执行结果"
-        has_observation = bool(re.search(template_pattern, prompt))
-        # 反向：再检查是否真的出现了非模板的 observation
-        all_observations = re.findall(r"Observation\s*[:：]\s*([^\n]+)", prompt)
-        real_observations = [o for o in all_observations if "动作执行结果" not in o]
-        if real_observations:
-            has_observation = True
-        else:
-            has_observation = False
-
-        # 智能选择工具
-        # 天气查询（关键词：天气、weather、温度、暖和、热、凉）
-        weather_signals = ["天气", "weather", "温度", "暖和", "热", "凉", "下雨", "下雪", "晴天"]
-        is_weather_query = (
-            any(s in question for s in weather_signals)
-            or any(s in question.lower() for s in ["weather", "temperature"])
-        )
-        if is_weather_query:
-            if "get_weather" in self.tools:
-                # 提取问题中所有城市
-                all_cities = self._extract_all_cities(question)
-                if not all_cities:
-                    all_cities = ["北京"]
-
-                if not has_observation:
-                    # 第一次：查询第一个城市
-                    return f"""Thought: 我需要查询城市天气来回答问题。
-Action: get_weather
-Action Input: {{"city": "{all_cities[0]}"}}"""
-                else:
-                    # 已查询过一些城市
-                    # 提取已查询的城市（兼容单/双引号）
-                    queried_cities = re.findall(r"['\"]city['\"]:\s*['\"]([^'\"]+)['\"]", prompt)
-                    # 是否需要继续查询（多城市比较）
-                    needs_more = (
-                        ("比较" in question or "哪个" in question or "vs" in question.lower() or len(all_cities) > 1)
-                        and len(set(queried_cities)) < len(all_cities)
-                    )
-                    if needs_more:
-                        # 查询下一个未查询的城市
-                        for c in all_cities:
-                            if c not in queried_cities:
-                                return f"""Thought: 我需要继续查询{c}的天气。
-Action: get_weather
-Action Input: {{"city": "{c}"}}"""
-                    # 已有足够信息，给出最终答案
-                    return f"Thought: 我已查询到所有需要的信息，现在给出最终答案。\nFinal Answer: {self._summarize_weather(prompt)}"
-
-        # 搜索类
-        if any(kw in question for kw in ["搜索", "查", "什么是", "search", "find"]):
-            if "search" in self.tools and not has_observation:
-                return f"""Thought: 我需要搜索相关信息。
-Action: search
-Action Input: {{"query": "{question}"}}"""
-            elif has_observation:
-                return f"Thought: 我已搜索到相关信息。\nFinal Answer: 根据搜索结果，{self._mock_search_answer(question)}"
-
-        # 计算类
-        calc_signals = ["计算", "等于多少", "等于几", "多少钱", "总共", "总价", "乘以", "除以", "加上", "减去"]
-        is_calc = (
-            re.search(r"\d+\s*[+\-×x*/÷=]\s*\d+", question)
-            or any(kw in question for kw in calc_signals)
-        )
-        if is_calc:
-            if "calculator" in self.tools and not has_observation:
-                # 优先提取数字运算符表达式
-                expr_match = re.search(r"(\d+\s*[+\-×x*/÷]\s*\d+(?:\s*[+\-×x*/÷]\s*\d+)*)", question)
-                if expr_match:
-                    expr = expr_match.group(1)
-                else:
-                    # 中文式算式转换
-                    expr = question
-                    for cn, sym in [("乘以", "*"), ("乘", "*"), ("除以", "/"), ("除", "/"),
-                                     ("加上", "+"), ("加", "+"), ("减去", "-"), ("减", "-")]:
-                        expr = expr.replace(cn, sym)
-                    # 提取数字和运算符
-                    import re as _re
-                    tokens = _re.findall(r"\d+|[+\-*/]", expr)
-                    expr = " ".join(tokens)
-                return f"""Thought: 我需要计算这个表达式。
-Action: calculator
-Action Input: {{"expression": "{expr}"}}"""
-            elif has_observation:
-                return f"Thought: 我已计算出结果。\nFinal Answer: {self._mock_calc_answer(prompt)}"
-
-        # 默认：尝试最终答案
-        if not has_observation and self.tools:
-            tool_name = list(self.tools.keys())[0]
-            return f"""Thought: 我尝试使用工具{tool_name}。
-Action: {tool_name}
-Action Input: {{"query": "{question}"}}"""
-
-        return f"Thought: 基于已有信息回答问题。\nFinal Answer: 针对'{question}'的回答。"
-
-    def _extract_first_city(self, question: str) -> str:
-        cities = ["北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "西安"]
-        for c in cities:
-            if c in question:
-                return c
-        return "北京"
-
-    def _extract_all_cities(self, question: str) -> list:
-        """提取问题中出现的所有城市，按问题中出现的顺序"""
-        cities = ["北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "西安"]
-        result = []
-        seen = set()
-        # 在问题中查找每个城市出现的位置，按位置排序
-        positions = []
-        for c in cities:
-            pos = question.find(c)
-            if pos != -1 and c not in seen:
-                positions.append((pos, c))
-                seen.add(c)
-        positions.sort()  # 按出现位置排序
-        return [c for _, c in positions]
-
-    def _summarize_weather(self, prompt: str) -> str:
-        observations = re.findall(r"Observation:\s*([^\n]+)", prompt)
-        if not observations:
-            return "未获取到天气信息"
-        return f"基于查询：{'；'.join(observations[:3])}。"
-
-    def _mock_search_answer(self, question: str) -> str:
-        return f"关于'{question}'，搜索结果显示这是相关信息。"
-
-    def _mock_calc_answer(self, prompt: str) -> str:
-        observations = re.findall(r"Observation:\s*(\d+)", prompt)
-        if observations:
-            return f"计算结果为 {observations[-1]}"
-        return "无法计算"
+        """ReAct 模拟LLM（用于无真实LLM时的测试）"""
+        # 简单的模拟逻辑
+        if "天气" in prompt:
+            return 'Thought: 我需要查询天气\nAction: get_weather\nAction Input: {"city": "北京"}'
+        return 'Thought: 我需要更多信息\nFinal Answer: 无法回答'
