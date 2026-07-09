@@ -46,10 +46,14 @@ class ReActReasoner(BaseReasoner):
 Thought: 你对当前情况的思考
 Action: 你要执行的动作（必须是以下工具之一：{tool_names}）
 Action Input: 动作参数（JSON格式）
-Observation: 动作执行结果（系统会填入）
-... (Thought/Action/Observation 可以重复多次)
-Thought: 我已经得到了最终答案
-Final Answer: 最终答案
+
+重要规则：
+1. 每次只输出一个 Thought + Action + Action Input，然后等待系统执行工具并返回 Observation
+2. 绝对不要自己编造 Observation 的内容，Observation 由系统工具返回
+3. 等待真实的 Observation 后再进行下一步思考
+4. 当你认为已经得到足够信息时，输出：
+   Thought: 我已经得到了最终答案
+   Final Answer: 最终答案
 
 可用工具：
 {tool_descriptions}
@@ -57,7 +61,8 @@ Final Answer: 最终答案
 {context}
 
 问题：{question}
-"""
+
+现在开始你的第一步思考："""
 
     REACT_FEWSHOT = """示例：
 问题：北京和上海今天哪个城市更暖和？
@@ -203,7 +208,7 @@ Final Answer: 上海今天更暖和（32度 vs 28度）
         )
 
     def _parse_response(self, response: str) -> Dict[str, Any]:
-        """解析 LLM 响应"""
+        """解析 LLM 响应，只提取第一个 Thought/Action/Action Input 或 Final Answer"""
         result = {
             "thought": "",
             "action": None,
@@ -211,37 +216,50 @@ Final Answer: 上海今天更暖和（32度 vs 28度）
             "final_answer": None
         }
 
-        # 提取 Final Answer
-        final_match = re.search(r"Final Answer\s*[:：]\s*(.+?)(?:\n|$)", response, re.IGNORECASE | re.DOTALL)
-        if final_match:
-            result["final_answer"] = final_match.group(1).strip()
-            # 提取 Final Answer 之前的 Thought
-            pre_text = response[:final_match.start()]
-            thought_match = re.search(r"Thought\s*[:：]\s*(.+?)$", pre_text, re.IGNORECASE | re.DOTALL)
-            if thought_match:
-                result["thought"] = thought_match.group(1).strip()
+        lines = response.strip().split('\n')
+        first_thought = None
+        first_action = None
+        first_action_input = None
+        first_final_answer = None
+
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+
+            # 只提取第一个 Thought
+            if line_stripped.lower().startswith('thought:') and first_thought is None:
+                first_thought = line_stripped.split(':', 1)[1].strip()
+
+            # 只提取第一个 Action
+            elif line_stripped.lower().startswith('action:') and first_action is None:
+                first_action = line_stripped.split(':', 1)[1].strip()
+
+            # 只提取第一个 Action Input
+            elif line_stripped.lower().startswith('action input:') and first_action_input is None:
+                input_str = line_stripped.split(':', 1)[1].strip()
+                try:
+                    import json
+                    first_action_input = json.loads(input_str)
+                except Exception:
+                    first_action_input = {"raw": input_str}
+
+            # 提取 Final Answer（这个可以覆盖，因为只应该出现一次）
+            elif line_stripped.lower().startswith('final answer:'):
+                first_final_answer = line_stripped.split(':', 1)[1].strip()
+
+        # 优先级：如果有 Final Answer 且没有待执行的 Action，则返回最终答案
+        if first_final_answer and not first_action:
+            result["final_answer"] = first_final_answer
+            if first_thought:
+                result["thought"] = first_thought
             return result
 
-        # 提取 Thought
-        thought_match = re.search(r"Thought\s*[:：]\s*(.+?)(?=\nAction|\nObservation|$)",
-                                  response, re.IGNORECASE | re.DOTALL)
-        if thought_match:
-            result["thought"] = thought_match.group(1).strip()
+        # 否则返回第一个 Thought/Action/Action Input
+        result["thought"] = first_thought or ""
+        result["action"] = first_action
+        result["action_input"] = first_action_input
 
-        # 提取 Action
-        action_match = re.search(r"Action\s*[:：]\s*(\w+)", response, re.IGNORECASE)
-        if action_match:
-            result["action"] = action_match.group(1).strip()
-
-        # 提取 Action Input
-        input_match = re.search(r"Action Input\s*[:：]\s*(\{.+?\})", response, re.IGNORECASE | re.DOTALL)
-        if input_match:
-            try:
-                import json
-                result["action_input"] = json.loads(input_match.group(1))
-            except Exception:
-                result["action_input"] = {"raw": input_match.group(1)}
-
+        # 如果有 Final Answer 但也有 Action，说明 LLM 编造了结果，忽略 Final Answer
+        # 强制要求先执行 Action
         return result
 
     def _is_in_loop(self, action: str) -> bool:
