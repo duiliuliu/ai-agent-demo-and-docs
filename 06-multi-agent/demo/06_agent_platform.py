@@ -19,13 +19,11 @@ import sys
 import logging
 
 demo_dir = os.path.dirname(os.path.abspath(__file__))
-skill_dir = os.path.dirname(demo_dir)
-sys.path.insert(0, os.path.join(skill_dir, "skill"))
 sys.path.insert(0, demo_dir)
 
 from demo_helper import create_agent, print_config_info, print_result
-from agent_swarm import AgentSwarm, CollaborationPattern
-from communication_bus import PubSubBus
+from skill.agent_swarm import AgentSwarm, CollaborationPattern
+from skill.communication_bus import PubSubBus
 
 
 class AgentPlatform:

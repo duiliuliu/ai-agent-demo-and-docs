@@ -19,11 +19,10 @@ import sys
 
 # 路径配置
 demo_dir = os.path.dirname(os.path.abspath(__file__))
-skill_dir = os.path.dirname(demo_dir)
-sys.path.insert(0, os.path.join(skill_dir, "skill"))  # 添加 skill 目录
+sys.path.insert(0, demo_dir)
 
 from demo_helper import create_agent, print_config_info, print_result
-from agent_swarm import AgentSwarm, CollaborationPattern
+from skill.agent_swarm import AgentSwarm, CollaborationPattern
 
 
 def demo_round_robin():

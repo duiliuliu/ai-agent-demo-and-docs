@@ -15,10 +15,12 @@ import sys
 import time
 import threading
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skill"))
+demo_dir = os.path.dirname(os.path.abspath(__file__))
+module_dir = os.path.dirname(demo_dir)
+sys.path.insert(0, module_dir)
 
-from communication_bus import BlackboardBus, AsyncBroadcastBus, FastChannelBus
-from agent_monitor import (
+from skill.communication_bus import BlackboardBus, AsyncBroadcastBus, FastChannelBus
+from skill.agent_monitor import (
     HeartbeatMonitor, RetryPolicy, CircuitBreaker,
     FailoverManager, ResilientAgentSwarm, AgentStatus
 )
