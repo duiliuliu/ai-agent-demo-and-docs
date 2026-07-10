@@ -101,6 +101,7 @@ class CollaborationPattern(Enum):
     TEAM_PIPELINE = "team_pipeline"   # 团队流水线
     AGENT_PLATFORM = "agent_platform" # Agent 平台
     COMPETITION = "competition"       # 竞争模式
+    ORCHESTRATED = "orchestrated"     # 编排式讨论（调度者动态决策）
 
 
 class CommunicationMode(Enum):
@@ -119,13 +120,19 @@ class AgentProfile:
     capabilities: List[str] = field(default_factory=list)
     priority: int = 0  # 优先级（用于竞争模式）
     max_concurrent_tasks: int = 1
+    is_coordinator: bool = False  # 是否为调度者（编排模式/主子模式）
+    speak_count: int = 0  # 发言次数（编排模式统计）
+    quality_score: float = 0.0  # 发言质量评分（编排模式动态调整）
     
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "role": self.role,
             "capabilities": self.capabilities,
-            "priority": self.priority
+            "priority": self.priority,
+            "is_coordinator": self.is_coordinator,
+            "speak_count": self.speak_count,
+            "quality_score": self.quality_score
         }
 
 
@@ -235,7 +242,8 @@ class AgentSwarm:
         agent_instance: Any,
         role: str,
         capabilities: Optional[List[str]] = None,
-        priority: int = 0
+        priority: int = 0,
+        is_coordinator: bool = False
     ) -> None:
         """注册 Agent 到协作系统"""
         self.agents[name] = agent_instance
@@ -243,7 +251,8 @@ class AgentSwarm:
             name=name,
             role=role,
             capabilities=capabilities or [role],
-            priority=priority
+            priority=priority,
+            is_coordinator=is_coordinator
         )
         logger.info(f"[AgentSwarm] 注册 Agent: {name}, 角色: {role}")
 
@@ -280,6 +289,8 @@ class AgentSwarm:
                 output = self._run_team_pipeline(task)
             elif pattern == CollaborationPattern.COMPETITION:
                 output = self._run_competition(task)
+            elif pattern == CollaborationPattern.ORCHESTRATED:
+                output = self._run_orchestrated(task)
             else:
                 raise ValueError(f"未支持的协作模式: {pattern}")
 
@@ -490,6 +501,415 @@ class AgentSwarm:
         )
 
         return f"最优方案（来自 {best_agent}）：{results[best_agent]}"
+
+    def _run_orchestrated(self, task: str) -> str:
+        """
+        编排式讨论模式：中心调度者动态决策发言顺序，每轮总结，判断是否继续。
+
+        核心设计：
+        1. 调度者决策：依据角色能力、信息缺口、依赖关系、发言均衡度、历史质量
+        2. 每轮总结：调度者总结本轮关键信息、共识、分歧、信息缺口
+        3. 终止判断：信息充足度、一致性、边际收益、轮次上限
+
+        调度策略：
+        - 第一轮：按角色能力顺序（基础信息先收集）
+        - 后续轮：信息缺口驱动 + 发言均衡（混合策略）
+        """
+        # 找出调度者（标记为 is_coordinator 的，或第一个）
+        coordinator_name = None
+        participant_names = []
+        for name, profile in self.profiles.items():
+            if profile.is_coordinator:
+                coordinator_name = name
+            else:
+                participant_names.append(name)
+
+        if coordinator_name is None:
+            coordinator_name = participant_names.pop(0) if participant_names else list(self.agents.keys())[0]
+
+        coordinator = self.agents[coordinator_name]
+        logger.info(f"[Orchestrated] 调度者: {coordinator_name}, 参与者: {participant_names}")
+
+        if not participant_names:
+            return "编排模式需要至少1个参与者Agent"
+
+        # 重置发言计数
+        for name in participant_names:
+            self.profiles[name].speak_count = 0
+
+        discussion_history = []  # 所有发言记录
+        round_summaries = []  # 每轮总结
+        final_decision = None
+
+        for round_num in range(1, self.max_rounds + 1):
+            self._current_round = round_num
+            logger.info(f"[Orchestrated] ===== 第 {round_num} 轮讨论 =====")
+
+            # ====== 第一步：调度者决定本轮发言顺序 ======
+            speak_order = self._decide_speak_order(
+                coordinator_name, coordinator, task,
+                participant_names, discussion_history, round_num
+            )
+            logger.info(f"[Orchestrated] 本轮发言顺序: {' → '.join(speak_order)}")
+
+            # ====== 第二步：按顺序发言 ======
+            round_outputs = []
+            for agent_name in speak_order:
+                if agent_name not in self.agents:
+                    continue
+
+                agent = self.agents[agent_name]
+                profile = self.profiles[agent_name]
+
+                # 构建发言prompt，包含历史讨论上下文
+                context = self._build_speak_context(
+                    task, discussion_history, round_summaries, agent_name, profile.role
+                )
+
+                response = self._call_agent(agent_name, agent, context)
+                profile.speak_count += 1
+
+                message = Message(
+                    trace_id=self._trace_id,
+                    sender=agent_name,
+                    receiver=coordinator_name,
+                    content=response,
+                    message_type="orchestrated_speak",
+                    metadata={"round": round_num, "order_index": speak_order.index(agent_name)}
+                )
+                self.message_history.append(message)
+
+                round_outputs.append(f"[{agent_name}] {response}")
+                discussion_history.append(f"[第{round_num}轮][{agent_name}] {response}")
+
+                self.blackboard[f"result_{agent_name}"] = response
+
+            # ====== 第三步：调度者总结本轮 ======
+            summary = self._orchestrator_summarize(
+                coordinator_name, coordinator, task,
+                round_num, round_outputs, discussion_history
+            )
+            round_summaries.append(f"[第{round_num}轮总结] {summary}")
+
+            logger.info(f"[Orchestrated] 第 {round_num} 轮总结: {summary[:100]}...")
+
+            message = Message(
+                trace_id=self._trace_id,
+                sender=coordinator_name,
+                receiver="all",
+                content=summary,
+                message_type="round_summary",
+                metadata={"round": round_num}
+            )
+            self.message_history.append(message)
+
+            # ====== 第四步：调度者判断是否继续 ======
+            should_continue, decision_info = self._orchestrator_decide_continue(
+                coordinator_name, coordinator, task,
+                round_num, summary, discussion_history, round_summaries
+            )
+
+            logger.info(f"[Orchestrated] 是否继续: {should_continue}, 理由: {decision_info.get('reason', '')}")
+
+            message = Message(
+                trace_id=self._trace_id,
+                sender=coordinator_name,
+                receiver="all",
+                content=str(decision_info),
+                message_type="continue_decision",
+                metadata={"round": round_num, "should_continue": should_continue}
+            )
+            self.message_history.append(message)
+
+            if not should_continue:
+                final_decision = decision_info
+                # 让调度者给出最终答案
+                final_answer = self._orchestrator_final_answer(
+                    coordinator_name, coordinator, task, discussion_history, round_summaries
+                )
+                return final_answer
+
+        # 达到最大轮次，强制结束
+        logger.info("[Orchestrated] 达到最大轮次，结束讨论")
+        final_answer = self._orchestrator_final_answer(
+            coordinator_name, coordinator, task, discussion_history, round_summaries
+        )
+        return final_answer
+
+    def _decide_speak_order(
+        self,
+        coordinator_name: str,
+        coordinator: Any,
+        task: str,
+        participant_names: List[str],
+        history: List[str],
+        round_num: int
+    ) -> List[str]:
+        """
+        调度者决策发言顺序。
+
+        决策依据（由LLM调度者智能判断）：
+        1. 角色能力匹配：当前需要什么信息，哪个Agent最匹配
+        2. 信息缺口：已有的信息覆盖了哪些维度，还缺什么
+        3. 发言均衡：防止过度调用或冷落某个Agent
+
+        策略：
+        - 第1轮：按注册顺序（预设依赖链）
+        - 后续轮：让调度者LLM动态决策
+        """
+        # 第1轮：按注册顺序发言（确保基础信息先收集）
+        if round_num == 1:
+            return participant_names[:]
+
+        # 后续轮：让调度者LLM决策本轮发言顺序
+        participant_info = []
+        for name in participant_names:
+            profile = self.profiles[name]
+            participant_info.append(
+                f"- {name} (角色: {profile.role}, 能力: {', '.join(profile.capabilities)}, "
+                f"已发言{profile.speak_count}次)"
+            )
+
+        recent_history = history[-10:] if len(history) > 10 else history
+
+        decision_prompt = f"""你是讨论调度者，请决定下一轮的发言顺序。
+
+原始任务: {task}
+
+当前轮次: 第 {round_num} 轮
+
+可用参与者:
+{chr(10).join(participant_info)}
+
+历史讨论（最近10条）:
+{chr(10).join(recent_history) if recent_history else '（无历史）'}
+
+请基于以下维度决策发言顺序：
+1. 信息缺口：当前讨论缺少哪方面的信息？哪个Agent能补充？
+2. 角色匹配：哪个Agent的能力与当前讨论阶段最匹配？
+3. 发言均衡：是否有Agent发言过少，需要给机会？
+4. 依赖关系：某些Agent的发言需要先有其他Agent的信息？
+
+输出格式（严格按以下格式，不要额外内容）：
+【发言顺序】
+Agent名1
+Agent名2
+...
+
+【调度理由】
+（简要说明为什么这样安排顺序）
+
+注意：
+- 只需要列出本轮要发言的Agent，不需要包含所有参与者
+- 顺序很重要，排在前面的先发言
+- 每轮建议发言2-4个Agent即可，不必所有都发言
+"""
+
+        try:
+            decision = self._call_agent(coordinator_name, coordinator, decision_prompt)
+            order = self._parse_speak_order(decision, participant_names)
+            if order:
+                return order
+        except Exception as e:
+            logger.warning(f"[Orchestrated] 调度决策失败，使用默认顺序: {e}")
+
+        # Fallback：轮询所有参与者
+        return participant_names[:]
+
+    def _parse_speak_order(self, decision: str, valid_names: List[str]) -> List[str]:
+        """解析调度者的发言顺序决策"""
+        order = []
+        lines = decision.strip().split('\n')
+        in_order_section = False
+
+        for line in lines:
+            line = line.strip()
+            if '【发言顺序】' in line or '【发言顺序】' in line or '发言顺序' in line:
+                in_order_section = True
+                continue
+            if '【调度理由】' in line or '调度理由' in line:
+                in_order_section = False
+                continue
+
+            if in_order_section and line:
+                # 清理行首的序号、符号等
+                clean_line = line.lstrip('-*•0123456789. )、').strip()
+                if clean_line in valid_names and clean_line not in order:
+                    order.append(clean_line)
+
+        return order
+
+    def _build_speak_context(
+        self, task: str, history: List[str],
+        round_summaries: List[str], agent_name: str, role: str
+    ) -> str:
+        """构建Agent发言的上下文"""
+        recent_history = history[-6:] if len(history) > 6 else history
+        recent_summaries = round_summaries[-2:] if len(round_summaries) > 2 else round_summaries
+
+        context_parts = [f"你是{agent_name}，角色是【{role}】。", f"原始任务: {task}", ""]
+
+        if recent_summaries:
+            context_parts.append("各轮总结:")
+            context_parts.extend(recent_summaries)
+            context_parts.append("")
+
+        if recent_history:
+            context_parts.append("最近讨论记录:")
+            context_parts.extend(recent_history)
+            context_parts.append("")
+
+        context_parts.append("请基于以上讨论，给出你的观点和分析。保持简洁，聚焦于你的专业领域。")
+
+        return "\n".join(context_parts)
+
+    def _orchestrator_summarize(
+        self,
+        coordinator_name: str,
+        coordinator: Any,
+        task: str,
+        round_num: int,
+        round_outputs: List[str],
+        all_history: List[str]
+    ) -> str:
+        """调度者总结本轮讨论"""
+        summary_prompt = f"""你是讨论调度者，请总结本轮讨论的核心内容。
+
+原始任务: {task}
+当前轮次: 第 {round_num} 轮
+
+本轮发言:
+{chr(10).join(round_outputs)}
+
+请从以下维度总结（简洁明了）：
+1. 关键信息：本轮获得了哪些重要信息？
+2. 共识点：大家在哪些方面达成了一致？
+3. 分歧点：主要的争议或不同意见是什么？
+4. 信息缺口：还缺少哪些关键信息？
+
+输出格式：
+【本轮总结】
+关键信息: ...
+共识点: ...
+分歧点: ...
+信息缺口: ...
+"""
+
+        try:
+            summary = self._call_agent(coordinator_name, coordinator, summary_prompt)
+            return summary
+        except Exception as e:
+            logger.warning(f"[Orchestrated] 总结失败: {e}")
+            return f"本轮共 {len(round_outputs)} 个Agent发言"
+
+    def _orchestrator_decide_continue(
+        self,
+        coordinator_name: str,
+        coordinator: Any,
+        task: str,
+        round_num: int,
+        current_summary: str,
+        all_history: List[str],
+        round_summaries: List[str]
+    ) -> tuple:
+        """
+        调度者判断是否继续讨论。
+
+        返回: (should_continue: bool, decision_info: dict)
+        """
+        # 边界：至少2轮才考虑终止（第1轮收集信息，第2轮判断）
+        if round_num < 2:
+            return True, {"reason": "讨论轮次不足，需要更多信息", "round": round_num}
+
+        decision_prompt = f"""你是讨论调度者，请判断当前讨论是否可以终止。
+
+原始任务: {task}
+已讨论轮次: {round_num} 轮
+
+本轮总结:
+{current_summary}
+
+各轮总结:
+{chr(10).join(round_summaries)}
+
+请从以下维度评估（每项1-10分）：
+1. 信息充足度：已有信息是否足以回答原始问题？
+2. 一致性：各Agent观点是否趋于一致？
+3. 边际收益：继续讨论是否会有显著新信息？
+
+输出格式（严格按此格式）：
+【终止判断】
+是否终止: 是/否
+信息充足度: X/10
+一致性: X/10
+边际收益: X/10
+理由: ...（详细说明为什么终止或继续）
+"""
+
+        try:
+            decision = self._call_agent(coordinator_name, coordinator, decision_prompt)
+            should_continue, info = self._parse_continue_decision(decision)
+            info["round"] = round_num
+            return should_continue, info
+        except Exception as e:
+            logger.warning(f"[Orchestrated] 终止判断失败，默认继续: {e}")
+            return True, {"reason": "判断失败，继续讨论", "round": round_num}
+
+    def _parse_continue_decision(self, decision: str) -> tuple:
+        """解析终止判断结果"""
+        lines = decision.strip().split('\n')
+        should_terminate = False
+        info = {"raw_decision": decision[:200]}
+
+        for line in lines:
+            line = line.strip()
+            if '是否终止' in line:
+                if '是' in line and '否' not in line:
+                    should_terminate = True
+                elif '否' in line:
+                    should_terminate = False
+            elif '信息充足度' in line:
+                info["info_sufficiency"] = line
+            elif '一致性' in line and '信息' not in line:
+                info["consensus"] = line
+            elif '边际收益' in line:
+                info["marginal_gain"] = line
+            elif '理由' in line:
+                info["reason"] = line.split(':', 1)[-1].strip() if ':' in line else line
+
+        info.setdefault("reason", "调度者决策")
+        return (not should_terminate), info  # 返回 should_continue
+
+    def _orchestrator_final_answer(
+        self,
+        coordinator_name: str,
+        coordinator: Any,
+        task: str,
+        all_history: List[str],
+        round_summaries: List[str]
+    ) -> str:
+        """调度者给出最终答案"""
+        final_prompt = f"""你是讨论调度者，请基于全部讨论，给出最终结论。
+
+原始任务: {task}
+
+各轮总结:
+{chr(10).join(round_summaries)}
+
+请给出：
+1. 最终结论/答案
+2. 关键依据
+3. 风险提示或注意事项
+
+保持清晰、结构化。
+"""
+
+        try:
+            answer = self._call_agent(coordinator_name, coordinator, final_prompt)
+            return answer
+        except Exception as e:
+            logger.warning(f"[Orchestrated] 生成最终答案失败: {e}")
+            return f"讨论结束（{len(round_summaries)}轮），汇总见各轮总结"
 
     # ========== 工具方法 ==========
 
